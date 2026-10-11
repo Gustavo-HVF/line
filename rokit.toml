@@ -1,0 +1,5 @@
+# Ferramentas usadas no projeto (instale com: rokit install)
+[tools]
+rojo = "rojo-rbx/rojo@7.4.4"
+stylua = "JohnnyMorganz/StyLua@0.20.0"
+luau-lsp = "JohnnyMorganz/luau-lsp@1.32.4"
