@@ -15,6 +15,7 @@ local D = Kit.D
 local L = Kit.L
 local GHOST = { Ghost = true }
 local GHOST_NO_SHADOW = { Ghost = true, NoShadow = true }
+local NO_SHADOW = { NoShadow = true }
 
 local VERTICAL = CFrame.Angles(0, 0, math.rad(90))
 
@@ -345,15 +346,18 @@ function Furniture.FloorLamp(ctx, parent, cf: CFrame, lit: boolean?)
 	return base
 end
 
--- Quadro na parede. `cf` fica na superfície da parede, com a frente para o -Z.
+-- Quadro na parede (LooseProp: explosões o derrubam). `cf` fica na superfície da parede, com a frente para o -Z.
+-- Objetos de parede: a moldura é a raiz (colide, para cair no chão quando solta) e os detalhes vão soldados nela.
 function Furniture.Painting(ctx, parent, cf: CFrame, w: number, h: number, rng: Random, frameColor: Color3?)
-	B(ctx, parent, "Quadro", cf, 0, 0, -0.1, w, h, 0.2, frameColor or Palette.Gold, M.Wood, nil, GHOST_NO_SHADOW)
+	local frame = B(ctx, parent, "Quadro", cf, 0, 0, -0.1, w, h, 0.2, frameColor or Palette.Gold, M.Wood, L, NO_SHADOW)
 	local canvas = Palette.pick(Palette.Canvas, rng)
-	B(ctx, parent, "Tela", cf, 0, 0, -0.22, w - 0.6, h - 0.6, 0.06, canvas, M.Fabric, nil, GHOST_NO_SHADOW)
+	local details = {
+		B(ctx, parent, "Tela", cf, 0, 0, -0.22, w - 0.6, h - 0.6, 0.06, canvas, M.Fabric, nil, GHOST_NO_SHADOW),
+	}
 	local motif = rng:NextInteger(1, 3)
 	if motif == 1 then
 		-- Paisagem: faixa de terra/mar na metade de baixo.
-		B(
+		local landscape = B(
 			ctx,
 			parent,
 			"Paisagem",
@@ -369,9 +373,10 @@ function Furniture.Painting(ctx, parent, cf: CFrame, w: number, h: number, rng: 
 			nil,
 			GHOST_NO_SHADOW
 		)
+		table.insert(details, landscape)
 	elseif motif == 2 then
 		-- Retrato: silhueta oval.
-		Kit.cylinderAlong(
+		local portrait = Kit.cylinderAlong(
 			ctx,
 			parent,
 			"Retrato",
@@ -383,7 +388,10 @@ function Furniture.Painting(ctx, parent, cf: CFrame, w: number, h: number, rng: 
 			nil,
 			GHOST_NO_SHADOW
 		)
+		table.insert(details, portrait)
 	end
+	Kit.weldTo(frame, details)
+	return frame
 end
 
 -- Lareira encostada na parede (+Z). `wallHeight` define a altura da coifa de tijolos.
@@ -393,22 +401,7 @@ function Furniture.Fireplace(ctx, parent, cf: CFrame, w: number, wallHeight: num
 	B(ctx, parent, "Lareira", cf, w / 2 - 0.7, 2.5, 0.2, 1.4, 5, 2, stone, M.Marble, D)
 	B(ctx, parent, "Cornija", cf, 0, 5.4, 0.1, w + 0.6, 0.8, 2.4, Palette.Marble, M.Marble, D)
 	B(ctx, parent, "Fornalha", cf, 0, 2.2, 0.8, w - 2.8, 4.4, 0.6, Palette.Black, M.Slate)
-	B(
-		ctx,
-		parent,
-		"Base",
-		cf,
-		0,
-		0.15,
-		-0.6,
-		w + 1.6,
-		0.3,
-		2.2,
-		Palette.StoneDark,
-		M.Slate,
-		nil,
-		{ CanCollide = false }
-	)
+	B(ctx, parent, "Base", cf, 0, 0.15, -0.6, w + 1.6, 0.3, 2.2, Palette.StoneDark, M.Slate)
 	if wallHeight > 7 then
 		B(
 			ctx,
@@ -478,21 +471,71 @@ end
 -- Máscara tribal na parede (`cf` na superfície da parede, frente para o -Z).
 function Furniture.Mask(ctx, parent, cf: CFrame, rng: Random)
 	local color = Palette.pick({ Palette.WoodRed, Palette.Wood, Palette.WoodLight }, rng)
-	B(ctx, parent, "Mascara", cf, 0, 0, -0.25, 1.8, 2.6, 0.5, color, M.Wood, nil, GHOST_NO_SHADOW)
-	B(ctx, parent, "Olho", cf, -0.45, 0.4, -0.52, 0.4, 0.3, 0.06, Palette.Black, M.SmoothPlastic, nil, GHOST_NO_SHADOW)
-	B(ctx, parent, "Olho", cf, 0.45, 0.4, -0.52, 0.4, 0.3, 0.06, Palette.Black, M.SmoothPlastic, nil, GHOST_NO_SHADOW)
-	B(ctx, parent, "Boca", cf, 0, -0.65, -0.52, 0.9, 0.25, 0.06, Palette.Black, M.SmoothPlastic, nil, GHOST_NO_SHADOW)
+	local mask = B(ctx, parent, "Mascara", cf, 0, 0, -0.25, 1.8, 2.6, 0.5, color, M.Wood, L, NO_SHADOW)
+	Kit.weldTo(mask, {
+		B(
+			ctx,
+			parent,
+			"Olho",
+			cf,
+			-0.45,
+			0.4,
+			-0.52,
+			0.4,
+			0.3,
+			0.06,
+			Palette.Black,
+			M.SmoothPlastic,
+			nil,
+			GHOST_NO_SHADOW
+		),
+		B(
+			ctx,
+			parent,
+			"Olho",
+			cf,
+			0.45,
+			0.4,
+			-0.52,
+			0.4,
+			0.3,
+			0.06,
+			Palette.Black,
+			M.SmoothPlastic,
+			nil,
+			GHOST_NO_SHADOW
+		),
+		B(
+			ctx,
+			parent,
+			"Boca",
+			cf,
+			0,
+			-0.65,
+			-0.52,
+			0.9,
+			0.25,
+			0.06,
+			Palette.Black,
+			M.SmoothPlastic,
+			nil,
+			GHOST_NO_SHADOW
+		),
+	})
+	return mask
 end
 
 -- Cabeça de animal empalhada (troféu de caça), presa na parede.
 function Furniture.TrophyHead(ctx, parent, cf: CFrame, rng: Random)
-	B(ctx, parent, "Placa", cf, 0, 0, -0.15, 2.2, 2.8, 0.3, Palette.WoodDark, M.Wood, nil, GHOST_NO_SHADOW)
+	local plaque = B(ctx, parent, "Placa", cf, 0, 0, -0.15, 2.2, 2.8, 0.3, Palette.WoodDark, M.Wood, L, NO_SHADOW)
 	local fur =
 		Palette.pick({ Color3.fromRGB(150, 110, 60), Color3.fromRGB(110, 80, 50), Color3.fromRGB(70, 60, 54) }, rng)
-	B(ctx, parent, "Cabeca", cf, 0, 0, -1.2, 1.5, 1.6, 1.9, fur, M.Fabric, nil, GHOST)
-	B(ctx, parent, "Focinho", cf, 0, -0.35, -2.4, 0.9, 0.9, 0.8, fur, M.Fabric, nil, GHOST)
+	local details = {
+		B(ctx, parent, "Cabeca", cf, 0, 0, -1.2, 1.5, 1.6, 1.9, fur, M.Fabric, nil, GHOST),
+		B(ctx, parent, "Focinho", cf, 0, -0.35, -2.4, 0.9, 0.9, 0.8, fur, M.Fabric, nil, GHOST),
+	}
 	for _, side in { -1, 1 } do
-		Kit.box(
+		local horn = Kit.box(
 			ctx,
 			parent,
 			"Chifre",
@@ -503,7 +546,10 @@ function Furniture.TrophyHead(ctx, parent, cf: CFrame, rng: Random)
 			nil,
 			GHOST_NO_SHADOW
 		)
+		table.insert(details, horn)
 	end
+	Kit.weldTo(plaque, details)
+	return plaque
 end
 
 -- Vaso de planta (LooseProp).
@@ -1074,8 +1120,10 @@ end
 
 -- Lança/rifle pendurados (decoração da sala de troféus), `cf` na superfície da parede.
 function Furniture.WallWeapons(ctx, parent, cf: CFrame)
+	local shield = B(ctx, parent, "Escudo", cf, 0, 0, -0.35, 1.6, 2.4, 0.3, Palette.WoodRed, M.Leather, L, NO_SHADOW)
+	local spears = {}
 	for _, side in { -1, 1 } do
-		Kit.box(
+		local spear = Kit.box(
 			ctx,
 			parent,
 			"Lanca",
@@ -1086,8 +1134,10 @@ function Furniture.WallWeapons(ctx, parent, cf: CFrame)
 			nil,
 			GHOST_NO_SHADOW
 		)
+		table.insert(spears, spear)
 	end
-	B(ctx, parent, "Escudo", cf, 0, 0, -0.35, 1.6, 2.4, 0.3, Palette.WoodRed, M.Leather, nil, GHOST_NO_SHADOW)
+	Kit.weldTo(shield, spears)
+	return shield
 end
 
 -- Tapete de pele listrada.

@@ -8,7 +8,6 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
-local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 local Tags = require(ReplicatedStorage.Shared.Tags)
 
 local Furniture = require(script.Parent.Furniture)
@@ -305,8 +304,8 @@ local function openDoor(door: DoorRecord)
 		value:Destroy()
 		tween:Destroy()
 	end)
+	-- O som das portas é tocado pelo MatchService (um só, no centro da sala), para não somar três rangidos.
 	tween:Play()
-	SoundUtil.Play("DoorOpen", { Position = door.leaf.Position, Volume = 0.8 })
 end
 
 -- Abre as portas (tween na dobradiça) e libera a destruição das paredes da sala. Não cede (não usa wait).

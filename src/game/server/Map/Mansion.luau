@@ -80,7 +80,7 @@ local DOUBLE_HEIGHT = { Hall = true, Biblioteca = true, EscadaFundos = true }
 
 -- Paredes paralelas ao eixo X (entre faixas). Uma especificação por coluna.
 -- Strings: "wall" | "door" | "start" (porta da sala inicial). Tabelas: { kind, from, to, offset, height }
--- com posições relativas ao centro da célula.
+-- com posições relativas ao centro da célula. Uma lista de especificações cria várias aberturas na mesma célula.
 local X_LINES = {
 	{
 		z = 26,
@@ -111,7 +111,8 @@ local X_LINES = {
 				"door",
 				"wall",
 				"door",
-				{ kind = "door", from = -13.5, to = -5.5, height = 10 },
+				-- Saída da escada dos fundos e a porta do patamar (logo acima da porta do térreo).
+				{ { kind = "door", from = -13.5, to = -5.5, height = 10 }, { kind = "door", offset = 6 } },
 				"door",
 				"wall",
 				"door",
@@ -123,8 +124,9 @@ local X_LINES = {
 -- Paredes paralelas ao eixo Z (entre colunas), por faixa de cômodos. Índice k = parede entre a coluna k e k+1.
 -- "none" = mesmo cômodo dos dois lados; "seal" = parede da sala inicial.
 local Z_LINES = {
+	-- Sem porta entre a Sala de Estar e o Hall: a escadaria principal encosta nessa parede.
 	F = {
-		[0] = { "door", "door", "door", "door", "none", "door" },
+		[0] = { "door", "door", "wall", "door", "none", "door" },
 		[1] = { "door", "wall", "wall", "wall", "none", "wall" },
 	},
 	M = {
@@ -561,9 +563,9 @@ function Mansion.Build(ctx)
 					style.tags = I
 					style.collect = sealParts
 				end
-				local opening = resolveSpec(spec, colCenter(c), colX0(c), colX1(c), floorY, WALL_IN_HEIGHT)
 				if type(spec) == "table" and spec.kind == "railing" then
 					-- Sem parede: balaustrada na beira do vão, deixando livre a chegada da escada.
+					local opening = resolveSpec(spec, colCenter(c), colX0(c), colX1(c), floorY, WALL_IN_HEIGHT)
 					local from, to = opening.center - opening.width / 2, opening.center + opening.width / 2
 					Kit.box(
 						ctx,
@@ -584,17 +586,21 @@ function Mansion.Build(ctx)
 					})
 				else
 					local openings = {}
-					if opening then
-						table.insert(openings, opening)
-						record(story, "X", line, opening)
-						if isStart then
-							table.insert(startDoorSlots, {
-								center = Vector3.new(opening.center, floorY, line),
-								width = opening.width,
-								height = opening.top - opening.bottom,
-								-- O corredor fica do lado de fora da sala inicial (a porta abre para ele).
-								outward = (xl.z > 0) and 1 or -1,
-							})
+					local specList = (type(spec) == "table" and spec[1] ~= nil) and spec or { spec }
+					for _, item in specList do
+						local opening = resolveSpec(item, colCenter(c), colX0(c), colX1(c), floorY, WALL_IN_HEIGHT)
+						if opening then
+							table.insert(openings, opening)
+							record(story, "X", line, opening)
+							if isStart then
+								table.insert(startDoorSlots, {
+									center = Vector3.new(opening.center, floorY, line),
+									width = opening.width,
+									height = opening.top - opening.bottom,
+									-- O corredor fica do lado de fora da sala inicial (a porta abre para ele).
+									outward = (xl.z > 0) and 1 or -1,
+								})
+							end
 						end
 					end
 					buildWall(ctx, structure, "X", line, a0, a1, floorY, floorY + WALL_IN_HEIGHT, openings, style)
@@ -747,9 +753,9 @@ function Mansion.Build(ctx)
 		D
 	)
 
-	-- Mezanino da biblioteca (faixa de 5,5 studs junto à parede do corredor).
+	-- Mezanino da biblioteca (faixa de 7 studs junto à parede do corredor).
 	local libX0, libX1 = colX0(5), colX1(6)
-	local mezzanineZ0, mezzanineZ1 = CZ + 26, CZ + 31.5
+	local mezzanineZ0, mezzanineZ1 = CZ + 26, CZ + 33
 	Kit.box(
 		ctx,
 		structure,
@@ -1029,11 +1035,11 @@ function Mansion.Build(ctx)
 						h = height,
 						openings = openings,
 					})
-					-- Áreas reservadas (escadas).
+					-- Áreas reservadas: as escadas e o espaço livre até a parede na frente do primeiro degrau.
 					if key == "Hall" then
-						room:reserveWorld(CX - 13.5, CX - 5.5, CZ + 26, CZ + 50.5)
+						room:reserveWorld(CX - 13.5, CX - 5.5, CZ + 26, CZ + HALF_D)
 					elseif key == "EscadaFundos" then
-						room:reserveWorld(CX - 13.5, CX - 5.5, CZ - 50.5, CZ - 26)
+						room:reserveWorld(CX - 13.5, CX - 5.5, CZ - HALF_D, CZ - 26)
 					elseif key == "Biblioteca" then
 						for _, x in { libX0 + 7, (libX0 + libX1) / 2, libX1 - 7 } do
 							room:reserveWorld(x - 1.2, x + 1.2, mezzanineZ1 - 2.1, mezzanineZ1 + 0.3)

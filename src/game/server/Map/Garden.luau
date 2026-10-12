@@ -326,13 +326,14 @@ function Garden.Build(ctx, layout)
 				Vector3.new(islandCenter.X + gx * SECTOR_SIZE, groundY, islandCenter.Z + gz * SECTOR_SIZE)
 			local distance = (Vector3.new(sectorCenter.X - islandCenter.X, 0, sectorCenter.Z - islandCenter.Z)).Magnitude
 			if distance < plateauRadius + SECTOR_SIZE * 0.3 then
+				-- Jardim mais aberto perto da mansão; selva fechada perto da praia.
 				local trees, bushes, ferns, bigLeaves
 				if distance < 200 then
-					trees, bushes, ferns, bigLeaves = 1, 2, 0, 0
+					trees, bushes, ferns, bigLeaves = 2, 3, 1, 0
 				elseif distance < 380 then
-					trees, bushes, ferns, bigLeaves = 2, 2, 1, 0
+					trees, bushes, ferns, bigLeaves = 5, 4, 2, 1
 				else
-					trees, bushes, ferns, bigLeaves = 3, 2, 1, 1
+					trees, bushes, ferns, bigLeaves = 9, 5, 3, 2
 				end
 				local function randomPoint(margin: number): Vector3?
 					for _ = 1, 12 do
@@ -366,7 +367,7 @@ function Garden.Build(ctx, layout)
 				for _ = 1, ferns do
 					local p = randomPoint(2)
 					if p then
-						Plants.Fern(ctx, chunk, p, rng:NextNumber(2.5, 4), rng)
+						Plants.Fern(ctx, chunk, p, rng:NextNumber(2.5, 4), rng, 4)
 					end
 				end
 				for _ = 1, bigLeaves do
@@ -385,7 +386,7 @@ function Garden.Build(ctx, layout)
 		{ point(fountain.X - FOUNTAIN_RING, fountain.Z), "Fonte" },
 		{ point(maze.entrance.X, maze.entrance.Z + 6), "Jardim dos Fundos" },
 		{ point(ghDoor.X - 6, ghDoor.Z), "Jardim Leste" },
-		{ point(gazebo.X, gazebo.Z + 3), "Coreto" },
+		{ point(gazebo.X, gazebo.Z + 3) + Vector3.new(0, 1, 0), "Coreto" }, -- o piso do coreto é 1 stud mais alto
 		{ point(fountain.X, (fountain.Z + avenueEnd.Z) / 2), "Avenida" },
 		{ point(avenueEnd.X, avenueEnd.Z - 4), "Avenida" },
 		{ point(westX, (fountain.Z + backZ) / 2), "Jardim Oeste" },

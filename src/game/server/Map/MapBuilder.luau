@@ -110,18 +110,7 @@ local function fallbackStart()
 	}
 end
 
-function MapBuilder.Build(): MapInfo
-	if mapInfo then
-		return mapInfo
-	end
-	if building then
-		-- Outra thread já está construindo: espera ela terminar.
-		while building do
-			task.wait(0.1)
-		end
-		return (mapInfo :: any) :: MapInfo
-	end
-	building = true
+local function buildAll(): MapInfo
 	local started = os.clock()
 	workspace:SetAttribute("MapReady", false)
 
@@ -191,7 +180,6 @@ function MapBuilder.Build(): MapInfo
 		mapFolder = mapFolder,
 	}
 	mapInfo = info
-	building = false
 	workspace:SetAttribute("MapReady", true)
 	print(
 		("[MapBuilder] Mapa pronto: %d parts, %d regiões, %d pontos de arma em %.2f s."):format(
@@ -202,6 +190,29 @@ function MapBuilder.Build(): MapInfo
 		)
 	)
 	return info
+end
+
+function MapBuilder.Build(): MapInfo
+	if mapInfo then
+		return mapInfo
+	end
+	if building then
+		-- Outra thread já está construindo: espera ela terminar.
+		while building do
+			task.wait(0.1)
+		end
+		if mapInfo then
+			return mapInfo
+		end
+		error("[MapBuilder] A construção do mapa falhou em outra chamada.")
+	end
+	building = true
+	local ok, result = xpcall(buildAll, debug.traceback)
+	building = false
+	if not ok then
+		error(result, 0)
+	end
+	return result
 end
 
 -- Abre (tween) as portas da sala inicial e libera a destruição das paredes dela. Pode ser chamada mais

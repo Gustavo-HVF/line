@@ -673,7 +673,7 @@ FURNISH.Library = function(room)
 	for _, along in { -23.5, -4.5, 4.5, 13.5, 22.5 } do
 		Furniture.Bookshelf(ctx, model, room:at(along, mezzanineFront + 0.85, 180, 16), 8, 10, 1.6, rng)
 	end
-	Kit.weaponSpawn(ctx, room:at(0, mezzanineFront + 3.4, 0, 17.5).Position, room.name)
+	Kit.weaponSpawn(ctx, room:at(0, mezzanineFront + 4.5, 0, 17.5).Position, room.name)
 	room:paintings(2, 22)
 end
 
@@ -968,20 +968,37 @@ FURNISH.Billiards = function(room)
 			end)
 		end
 	end
+	-- Suporte de tacos na parede (LooseProp).
 	room:wallItem("left", 0, 8, 1.6, 6, function(cf)
+		local rack = Kit.box(
+			ctx,
+			model,
+			"SuporteDeTacos",
+			cf * CFrame.new(0, -2.6, -0.15),
+			Vector3.new(1.6, 0.4, 0.3),
+			Palette.WoodDark,
+			M.Wood,
+			Kit.L,
+			{ NoShadow = true }
+		)
+		local cues = {}
 		for i = -1, 1 do
-			Kit.box(
-				ctx,
-				model,
-				"Taco",
-				cf * CFrame.new(i * 0.4, 0, -0.3),
-				Vector3.new(0.2, 6, 0.2),
-				Palette.WoodLight,
-				M.Wood,
-				nil,
-				{ Ghost = true }
+			table.insert(
+				cues,
+				Kit.box(
+					ctx,
+					model,
+					"Taco",
+					cf * CFrame.new(i * 0.4, 0, -0.3),
+					Vector3.new(0.2, 6, 0.2),
+					Palette.WoodLight,
+					M.Wood,
+					nil,
+					{ Ghost = true }
+				)
 			)
 		end
+		Kit.weldTo(rack, cues)
 	end)
 	room:tryAgainst({ "right", "left" }, { -8, 8 }, 3, 3, function(cf)
 		Furniture.Armchair(ctx, model, cf, Palette.Fabrics[3])
@@ -1078,7 +1095,7 @@ FURNISH.Ballroom = function(room)
 				Palette.Glass,
 				M.Glass,
 				Kit.D,
-				{ Reflectance = 0.6, CanCollide = false }
+				{ Reflectance = 0.6 }
 			)
 		end)
 	end
@@ -1305,7 +1322,7 @@ FURNISH.Observatory = function(room)
 	-- Cartas celestes (quadros azul-escuros).
 	for _, wall in { "left", "right", "front" } do
 		room:wallItem(wall, -7, 8, 4, 4, function(cf)
-			Kit.box(
+			local chart = Kit.box(
 				ctx,
 				model,
 				"CartaCeleste",
@@ -1313,10 +1330,10 @@ FURNISH.Observatory = function(room)
 				Vector3.new(4, 4, 0.2),
 				Palette.Canvas[6],
 				M.Fabric,
-				nil,
-				{ Ghost = true }
+				Kit.L,
+				{ NoShadow = true }
 			)
-			Kit.ball(
+			local star = Kit.ball(
 				ctx,
 				model,
 				"Estrela",
@@ -1327,6 +1344,7 @@ FURNISH.Observatory = function(room)
 				nil,
 				{ Ghost = true }
 			)
+			Kit.weldTo(chart, { star })
 		end)
 	end
 	room:chandelier(0, 0, 22, false, 2, 3)
@@ -1453,7 +1471,7 @@ FURNISH.Maps = function(room)
 	-- Mapas antigos nas paredes.
 	for _, wall in { "left", "right", "back", "front" } do
 		room:wallItem(wall, 7, 8, 5, 4, function(cf)
-			Kit.box(
+			local oldMap = Kit.box(
 				ctx,
 				model,
 				"MapaAntigo",
@@ -1461,10 +1479,10 @@ FURNISH.Maps = function(room)
 				Vector3.new(5, 4, 0.15),
 				Palette.Parchment,
 				M.Fabric,
-				nil,
-				{ Ghost = true }
+				Kit.L,
+				{ NoShadow = true }
 			)
-			Kit.box(
+			local island = Kit.box(
 				ctx,
 				model,
 				"Ilha",
@@ -1475,6 +1493,7 @@ FURNISH.Maps = function(room)
 				nil,
 				{ Ghost = true }
 			)
+			Kit.weldTo(oldMap, { island })
 		end)
 	end
 	room:chandelier(0, 1, 22, false, 2, 3)

@@ -253,6 +253,62 @@ function PhysUtil.EventGroundY(position: Vector3): number
 	return position.Y
 end
 
+-- Primeiro obstáculo sólido acima de `position` (teto), até `maxHeight` studs.
+function PhysUtil.CeilingAbove(position: Vector3, maxHeight: number): (Vector3?, BasePart?)
+	local result = workspace:Raycast(position, Vector3.new(0, maxHeight, 0), PhysUtil.RaycastParams())
+	if result then
+		return result.Position, result.Instance :: BasePart
+	end
+	return nil, nil
+end
+
+-- Ponto aleatório dentro do volume de uma part (bloco).
+function PhysUtil.RandomPointInPart(part: BasePart, rng: Random): Vector3
+	local half = part.Size / 2
+	return part.CFrame:PointToWorldSpace(
+		Vector3.new(rng:NextNumber(-half.X, half.X), rng:NextNumber(-half.Y, half.Y), rng:NextNumber(-half.Z, half.Z))
+	)
+end
+
+-- Serviços ----------------------------------------------------------------------------------
+
+local fallbackModules: { [string]: any } = {}
+
+-- require seguro de um módulo do servidor do jogo (caminho relativo a ServerScriptService.Game).
+local function loadFallback(...: string): any
+	local key = table.concat({ ... }, ".")
+	if fallbackModules[key] ~= nil then
+		return fallbackModules[key] or nil
+	end
+	local current: Instance? = script.Parent.Parent
+	for _, name in { ... } do
+		current = current and current:FindFirstChild(name)
+	end
+	local module = nil
+	if current and current:IsA("ModuleScript") then
+		local ok, result = pcall(require, current)
+		if ok then
+			module = result
+		end
+	end
+	fallbackModules[key] = module or false
+	return module
+end
+
+-- Serviços do EventContext com reserva: se o EventService não entregou algum, tenta carregar aqui.
+-- Módulos de outros donos podem continuar nil (NPC, Map); quem usa precisa conferir.
+function PhysUtil.Services(ctx: any): { [string]: any }
+	local given = (type(ctx) == "table" and type(ctx.services) == "table") and ctx.services or {}
+	return {
+		Destruction = given.Destruction or loadFallback("DestructionService"),
+		NPC = given.NPC or loadFallback("NPC", "NPCService"),
+		Board = given.Board or loadFallback("BoardService"),
+		Combat = given.Combat or CombatUtil,
+		Map = given.Map or loadFallback("Map", "MapBuilder"),
+		Ground = given.Ground or GroundUtil,
+	}
+end
+
 -- Jogadores ---------------------------------------------------------------------------------
 
 export type PlayerHit = { player: Player, root: BasePart, humanoid: Humanoid, distance: number }
