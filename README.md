@@ -96,12 +96,22 @@ rojo build game.project.json -o builds/Partida.rbxlx
 O teleporte entre lobby e partida **não funciona no Studio**, só no jogo publicado. No Studio, o botão mostra uma
 mensagem explicando isso.
 
-1. Publique o lobby como uma nova experiência (ele vira o *start place*).
-2. No [Creator Hub](https://create.roblox.com), abra a experiência → **Places** → **Add place**. Publique a partida nesse novo place.
-3. Copie os dois IDs para `src/shared/Config/Places.luau` (`LOBBY_PLACE_ID` e `GAME_PLACE_ID`).
+O lobby vai no place [Gustavogame979's Place](https://www.roblox.com/games/6305250851/Gustavogame979s-Place)
+(ID `6305250851`), que já está em `src/shared/Config/Places.luau` como `LOBBY_PLACE_ID`.
+
+1. Abra `builds/Lobby.rbxlx` no Studio → **Arquivo → Publicar no Roblox como…** → escolha a experiência
+   **Gustavogame979's Place** e o place `6305250851` → **Sobrescrever**. Isso **substitui** o que estiver nesse place hoje.
+2. No [Creator Hub](https://create.roblox.com), abra essa experiência → **Places** → **Add place**. Publique
+   `builds/Partida.rbxlx` nesse novo place do mesmo jeito.
+3. Copie o ID do place da partida para `GAME_PLACE_ID` em `src/shared/Config/Places.luau` e gere os `builds/` de novo.
 4. Publique os **dois** places de novo (o arquivo de IDs vai junto com cada um).
 5. Em **Game Settings → Security**, ative **Enable Studio Access to API Services** se quiser que as configurações sejam
    salvas também nos testes do Studio.
+
+Com o Rojo também dá para publicar sem abrir o Studio, usando uma chave da Open Cloud com permissão de publicar places:
+```
+rojo upload lobby.project.json --asset_id 6305250851 --universe_id <ID da experiência> --api_key <sua chave>
+```
 
 ## Sons
 
