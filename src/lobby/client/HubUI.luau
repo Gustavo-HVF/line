@@ -4,17 +4,20 @@
 --   * "Criar servidor": janela com nome, privacidade (Pública/Só amigos) e máximo de jogadores;
 --   * painel da minha sala: membros, "Iniciar partida" (só o dono), "Convidar amigos" e "Sair da sala";
 --   * "Voltar ao menu" (Hub_Leave + onBack).
--- O painel pode ser escondido para andar pelo hub. Atualiza com Party_Update e Party_GetList (ao abrir).
+-- O painel pode ser escondido para andar pelo hub (Q no PC). Com o painel aberto o mouse fica solto (botão
+-- Modal), já que no hub a câmera é em primeira pessoa. Atualiza com Party_Update e Party_GetList (ao abrir).
 -- Os avisos de teleporte (Menu_TeleportStatus) são tratados pelo TeleportOverlay, igual ao menu.
 --
 --   HubUI.Open(onBack: () -> ())
 --   HubUI.Close()
 --   HubUI.IsOpen(): boolean
 
+local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SocialService = game:GetService("SocialService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
@@ -32,6 +35,7 @@ local HEADER_HEIGHT = 44
 local FOOTER_HEIGHT = 46
 local ACTION_COOLDOWN = 0.6 -- o servidor aceita 1 pedido a cada 0,5 s por remote
 local START_BUTTON_LOCK = 3
+local TOGGLE_ACTION = "SelvaPainelSalas"
 
 local isOpen = false
 local collapsed = false
@@ -502,6 +506,15 @@ local function setCollapsed(value: boolean, instant: boolean?)
 		}):Play()
 	end
 	ui.showButton.Visible = value
+	-- Painel aberto: o botão Modal solta o mouse (em primeira pessoa ele fica preso no centro da tela).
+	ui.mouseUnlock.Visible = not value
+end
+
+local function onTogglePanel(_name: string, inputState: Enum.UserInputState)
+	if inputState == Enum.UserInputState.Begin and isOpen and ui then
+		setCollapsed(not collapsed)
+	end
+	return Enum.ContextActionResult.Sink
 end
 
 local function build()
@@ -518,11 +531,19 @@ local function build()
 	})
 
 	ui = { gui = gui, panel = panel, top = 64 }
+	ui.mouseUnlock = UIKit.Create("TextButton", {
+		Name = "SoltaMouse",
+		Text = "",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(0, 0),
+		Modal = true,
+		Parent = gui,
+	})
 
 	-- botão para mostrar o painel quando escondido
 	local showButton = UIKit.Button({
 		Name = "MostrarSalas",
-		Text = "Salas",
+		Text = if UserInputService.KeyboardEnabled then "Salas [Q]" else "Salas",
 		Style = "primary",
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -16, 0, 64),
@@ -781,12 +802,14 @@ function HubUI.Open(onBack: () -> ())
 	ui.gui.Enabled = true
 	isOpen = true
 	setCollapsed(false, true)
+	ContextActionService:BindAction(TOGGLE_ACTION, onTogglePanel, false, Enum.KeyCode.Q, Enum.KeyCode.ButtonSelect)
 	render()
 	requestList()
 end
 
 function HubUI.Close()
 	isOpen = false
+	ContextActionService:UnbindAction(TOGGLE_ACTION)
 	closeModal()
 	if ui then
 		ui.gui.Enabled = false

@@ -61,6 +61,8 @@ return {
 	MinSpace = 2,
 	Duration = 60,
 	Radius = 30,
+	Spread = false, -- sempre volta para onde o tabuleiro está
+	RestartDelay = { 35, 60 }, -- depois de devolver o tabuleiro, volta a atacar
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()

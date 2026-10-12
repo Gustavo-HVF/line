@@ -403,8 +403,13 @@ local function refreshEvents()
 	for _, entry in events do
 		count += 1
 		local info = entry.info
-		local remaining = math.max(math.ceil(info.duration - (now - entry.receivedAt)), 0)
-		entry.label.Text = ("%s\n%s · %ds"):format(info.name, info.regionName or "perto do tabuleiro", remaining)
+		if info.duration < 0 then
+			-- eventos que duram até o fim da partida
+			entry.label.Text = ("%s\n%s · até o fim"):format(info.name, info.regionName or "pelo mapa")
+		else
+			local remaining = math.max(math.ceil(info.duration - (now - entry.receivedAt)), 0)
+			entry.label.Text = ("%s\n%s · %ds"):format(info.name, info.regionName or "perto do tabuleiro", remaining)
+		end
 	end
 	ui.eventsPanel.Visible = count > 0
 end

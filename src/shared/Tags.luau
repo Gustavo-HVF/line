@@ -14,4 +14,5 @@ return {
 	Indestructible = "Indestructible", -- Nunca deve ser quebrado (tabuleiro, chão da ilha)
 	Water = "Water", -- Parts de água (oceano, água de enchente)
 	Weapon = "Weapon", -- Tool de arma
+	EventSkinned = "EventSkinned", -- BasePart que um evento físico já retexturizou (não muda de novo)
 }

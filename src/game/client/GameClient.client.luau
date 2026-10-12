@@ -2,10 +2,13 @@
 -- Entrada do cliente da PARTIDA:
 --   1. configurações (busca no servidor em paralelo com a tela de carregamento);
 --   2. tela de carregamento (bloqueante; pré-carrega o jogo se o jogador quiser);
---   3. interface e efeitos (HUD, enigma, efeitos, espectador, controles do tabuleiro);
---   4. avisa o servidor que está pronto (Game_ClientReady).
+--   3. interface e efeitos (HUD, enigma, efeitos, espectador, controles do tabuleiro, cutscene final);
+--   4. personagem: animação R6 de todos, primeira pessoa, corrida e escalada (desligados para quem foi
+--      eliminado e durante a cutscene final);
+--   5. avisa o servidor que está pronto (Game_ClientReady).
 -- Os módulos começam ANTES do aviso de pronto para não perder o estado que o servidor manda em resposta.
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
@@ -24,6 +27,14 @@ local RiddleUI = require(script.Parent.RiddleUI)
 local FxClient = require(script.Parent.FxClient)
 local Spectate = require(script.Parent.Spectate)
 local BoardClient = require(script.Parent.BoardClient)
+local EndCutscene = require(script.Parent.EndCutscene)
+
+local CharacterFolder = Shared:WaitForChild("Character")
+local FirstPerson = require(CharacterFolder:WaitForChild("FirstPerson"))
+local Movement = require(CharacterFolder:WaitForChild("Movement"))
+local R6Animator = require(CharacterFolder:WaitForChild("R6Animator"))
+
+local LocalPlayer = Players.LocalPlayer
 
 local TOAST_KINDS = { info = true, warning = true, danger = true, success = true }
 
@@ -61,6 +72,9 @@ task.spawn(function()
 	end
 end)
 
+-- Os outros jogadores já aparecem animados durante o carregamento.
+R6Animator.Init()
+
 -- 2. Tela de carregamento ----------------------------------------------------------------
 local loadingOk, loadingErr = pcall(LoadingScreen.Run, function()
 	return settingsDone
@@ -82,6 +96,7 @@ start("HUD", HUD)
 start("RiddleUI", RiddleUI)
 start("Spectate", Spectate)
 start("BoardClient", BoardClient)
+start("EndCutscene", EndCutscene)
 
 Net.event(Net.Names.Notify).OnClientEvent:Connect(function(text, kind)
 	if type(text) ~= "string" or text == "" then
@@ -90,5 +105,23 @@ Net.event(Net.Names.Notify).OnClientEvent:Connect(function(text, kind)
 	UIKit.Toast(text, TOAST_KINDS[kind] and kind or "info")
 end)
 
--- 4. Pronto! -------------------------------------------------------------------------------
+-- 4. Personagem ---------------------------------------------------------------------------
+local function refreshCharacterMode()
+	local eliminated = LocalPlayer:GetAttribute("Eliminated") == true
+	if eliminated or EndCutscene.IsPlaying() then
+		FirstPerson.Disable()
+		Movement.Disable()
+	else
+		FirstPerson.Enable()
+		Movement.Enable({ climb = true })
+	end
+end
+LocalPlayer:GetAttributeChangedSignal("Eliminated"):Connect(refreshCharacterMode)
+EndCutscene.Started:Connect(refreshCharacterMode)
+local ok, err = pcall(refreshCharacterMode)
+if not ok then
+	warn("[GameClient] Erro ao ligar a primeira pessoa: " .. tostring(err))
+end
+
+-- 5. Pronto! -------------------------------------------------------------------------------
 Net.event(Net.Names.Game_ClientReady):FireServer()

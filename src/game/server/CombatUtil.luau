@@ -11,9 +11,14 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Net = require(ReplicatedStorage.Shared.Net)
+local Signal = require(ReplicatedStorage.Shared.Util.Signal)
 local Tags = require(ReplicatedStorage.Shared.Tags)
 
 local CombatUtil = {}
+
+-- Disparado quando um jogador dá o golpe final num inimigo: (attacker: Player, enemy: Model).
+-- O MatchStats usa isto para contar os bichos abatidos de cada um.
+CombatUtil.EnemyKilled = Signal.new()
 
 -- Jogadores -----------------------------------------------------------------------
 
@@ -133,13 +138,19 @@ function CombatUtil.DamageEnemy(model: Model, amount: number, attacker: Player?)
 		model:SetAttribute("LastAttackerUserId", attacker.UserId)
 	end
 	local humanoid = CombatUtil.GetHumanoid(model)
+	local killed
 	if humanoid then
 		humanoid:TakeDamage(amount)
-		return humanoid.Health <= 0
+		killed = humanoid.Health <= 0
+	else
+		local health = math.max((tonumber(model:GetAttribute("Health")) or 0) - amount, 0)
+		model:SetAttribute("Health", health)
+		killed = health <= 0
 	end
-	local health = math.max((tonumber(model:GetAttribute("Health")) or 0) - amount, 0)
-	model:SetAttribute("Health", health)
-	return health <= 0
+	if killed and attacker then
+		CombatUtil.EnemyKilled:Fire(attacker, model)
+	end
+	return killed
 end
 
 -- Dano em área ----------------------------------------------------------------------

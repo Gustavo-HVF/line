@@ -77,6 +77,12 @@ return {
 	MinSpace = 8,
 	Duration = 45,
 	Radius = 70,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram chão pisoteado (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Pebble,
+		Colors = { Color3.fromRGB(152, 134, 106), Color3.fromRGB(138, 120, 94), Color3.fromRGB(166, 148, 118) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()

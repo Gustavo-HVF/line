@@ -92,6 +92,19 @@ do
 	end
 end
 
+-- Personagens R6: o MatchService cria cada um; o Init só liga o estado de movimento (escalada) replicado.
+do
+	local CharacterService, err = tryRequire(ServerScriptService, "ServerShared", "CharacterService")
+	if CharacterService and type(CharacterService.Init) == "function" then
+		local ok, initErr = pcall(CharacterService.Init)
+		if not ok then
+			warn("[GameMain] Erro ao iniciar o CharacterService: " .. tostring(initErr))
+		end
+	else
+		warn("[GameMain] CharacterService indisponível: " .. tostring(err))
+	end
+end
+
 -- 4. Remotes usados pelo fluxo da partida (existem antes de qualquer cliente pedir).
 for _, name in
 	{
@@ -106,6 +119,7 @@ for _, name in
 		Net.Names.Player_Eliminated,
 		Net.Names.Fx_Play,
 		Net.Names.Notify,
+		Net.Names.Game_EndCutscene,
 	}
 do
 	Net.event(name)

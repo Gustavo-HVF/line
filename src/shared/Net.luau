@@ -44,6 +44,14 @@ Net.Names = {
 	Weapon_Throw = "Weapon_Throw", -- C->S: (tool: Tool, target: Vector3)
 	Weapon_Reload = "Weapon_Reload", -- C->S: (tool: Tool)
 	Notify = "Notify", -- S->C: (text: string, kind: "info"|"warning"|"danger"|"success"?)
+	Game_EndCutscene = "Game_EndCutscene", -- S->C: (EndCutscenePayload) cutscene do fim + melhor jogador
+
+	-- Personagem (lobby e jogo)
+	Char_MoveState = "Char_MoveState", -- C->S: (state: "none"|"climb") vira o atributo MoveState do personagem
+
+	-- Placar global (lobby)
+	Leaderboard_Get = "Leaderboard_Get", -- RemoteFunction: () -> LeaderboardPayload
+	Leaderboard_Update = "Leaderboard_Update", -- S->C: (LeaderboardPayload)
 }
 
 local function getFolder(): Folder

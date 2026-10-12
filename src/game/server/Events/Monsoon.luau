@@ -77,6 +77,12 @@ return {
 	MinSpace = 6,
 	Duration = 75,
 	Radius = 55,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram lama (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Mud,
+		Colors = { Color3.fromRGB(94, 74, 52), Color3.fromRGB(80, 63, 45), Color3.fromRGB(106, 84, 60) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()

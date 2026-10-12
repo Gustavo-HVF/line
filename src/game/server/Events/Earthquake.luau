@@ -55,6 +55,12 @@ return {
 	MinSpace = 14,
 	Duration = 30,
 	Radius = 80,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram pedra rachada (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Basalt,
+		Colors = { Color3.fromRGB(72, 68, 66), Color3.fromRGB(60, 56, 54), Color3.fromRGB(86, 80, 76) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()

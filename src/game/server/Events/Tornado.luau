@@ -66,6 +66,12 @@ return {
 	MinSpace = 10,
 	Duration = 48,
 	Radius = 70,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram terra revirada (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Ground,
+		Colors = { Color3.fromRGB(122, 98, 72), Color3.fromRGB(106, 86, 64), Color3.fromRGB(134, 110, 82) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()

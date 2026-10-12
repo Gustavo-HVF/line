@@ -128,6 +128,10 @@ Sempre `Net.event(Net.Names.X)` / `Net.func(Net.Names.X)`. O servidor cria o rem
 | Weapon_Throw | RemoteEvent | C→S | `(tool, target: Vector3)` |
 | Weapon_Reload | RemoteEvent | C→S | `(tool)` |
 | Notify | RemoteEvent | S→C | `(text, kind?: "info"\|"warning"\|"danger"\|"success")`: o cliente mostra `UIKit.Toast` |
+| Game_EndCutscene | RemoteEvent | S→C | `(EndCutscenePayload)` cutscene final + melhor da partida |
+| Char_MoveState | RemoteEvent | C→S | `("none"\|"climb")` vira o atributo `MoveState` do personagem |
+| Leaderboard_Get | RemoteFunction | C→S | `() -> LeaderboardPayload` |
+| Leaderboard_Update | RemoteEvent | S→C | `(LeaderboardPayload)` |
 
 ### Payloads
 
@@ -298,10 +302,19 @@ EventService.Init(mapInfo)
 EventService.GetDefinition(eventId): EventDefinition?
 EventService.EventForSpace(space: number): string   -- plano sorteado no Init (respeita MinSpace e Weight)
 EventService.GetRiddle(eventId): string
-EventService.Start(eventId, position: Vector3): string  -- id da instância; respeita MAX_ACTIVE_EVENTS (encerra o mais antigo)
+EventService.Start(eventId, position: Vector3): string  -- id do evento; ele dura até StopAll (fim da partida)
 EventService.StopAll()
 EventService.GetActive(): { EventInfoPayload }
 ```
+
+**Focos (eventos até o fim da partida):** cada evento roda em focos. Um foco é uma chamada de `Start` com o seu
+próprio `EventContext` (pasta, `instanceId` único, usado como groupId dos NPCs). Ele termina no `Duration` (físicos) ou
+quando chama `ctx.finish()` (NPC: toda a onda morreu) e, depois de `RestartDelay`, recomeça em outro ponto:
+físicos em qualquer lugar da ilha ou perto de um jogador, NPC perto de um jogador, `Spread = false` no tabuleiro.
+Físicos têm `Sites` focos ao mesmo tempo (padrão `GameConfig.PHYSICAL_EVENT_SITES`); o total no mapa é limitado por
+`GameConfig.MAX_EVENT_SITES`. Ao começar um foco físico com `Skin`, `EventHelpers/SurfaceSkin` retextura os blocos
+em volta (tag `EventSkinned`: nunca mudam de novo; partes enormes ganham placas finas em `Map.PlacasDeEvento`).
+O HUD recebe `duration = -1` (até o fim).
 
 ### Formato de um evento (`Game/Events/<Nome>.luau`)
 
@@ -313,8 +326,12 @@ return {
 	Riddles = { "...", "..." },      -- 2 ou mais enigmas ORIGINAIS em pt-BR, rimados, que dão pistas do evento
 	Weight = 1,                      -- chance relativa
 	MinSpace = 1,                    -- primeira casa em que pode cair (eventos fortes mais para o fim)
-	Duration = 90,                   -- segundos; ao fim o EventService chama o cleanup
+	Duration = 90,                   -- segundos de cada foco; ao fim o EventService chama o cleanup e recomeça
 	Radius = 60,
+	Sites = 3,                       -- opcional: focos ao mesmo tempo (padrão: físicos 3, NPC 1)
+	Spread = false,                  -- opcional: sempre no tabuleiro (pelicano)
+	RestartDelay = { 3, 8 },         -- opcional: pausa entre focos (padrão: físicos 3–8 s, NPC 25–45 s)
+	Skin = { Material = Enum.Material.Sand, Colors = { Color3.fromRGB(196, 162, 106) } }, -- opcional (físicos)
 	Start = function(ctx: EventContext): () -> ()   -- NÃO pode ceder (yield); use task.spawn. Retorna cleanup idempotente.
 }
 ```
@@ -375,6 +392,23 @@ WeaponService.GiveWeapon(player: Player, kind: "Machete"|"Revolver"|"Shotgun"|"D
 Fases: `Loading` → `WaitingPlayers` → `Intro` (primeira jogada liberada) → `Countdown` (10 s) → portas abrem →
 `Playing` → `Victory` | `Defeat` → volta ao lobby.
 
+## Personagem, câmera e estatísticas
+
+- `ServerShared/CharacterService`: cria o personagem R6 de cada jogador com `CreateHumanoidModelFromDescription`
+  (`CharacterAutoLoads` fica desligado nos dois modos). No lobby renasce sozinho; na partida quem cria é o MatchService.
+  Recebe `Char_MoveState` e grava o atributo `MoveState` ("climb") no personagem.
+- `Shared/Character/R6Animator` (cliente): animação procedural de TODOS os personagens R6 via `Motor6D.Transform`.
+- `Shared/Character/FirstPerson` (cliente): `LockFirstPerson`, corpo visível, balanço da câmera. Ligado no hub e na
+  partida; desligado no menu, para eliminados (espectador) e na cutscene final. No hub, com o painel de salas aberto, um
+  botão `Modal` solta o mouse (Q esconde/mostra o painel).
+- `Shared/Character/Movement` (cliente): corrida com estamina e escalada (só na partida).
+- `Game/MatchStats`: abates (sinal `CombatUtil.EnemyKilled`, golpe final) e jogadas (`Rolled.rollerUserId`).
+  No fim, `Game_EndCutscene` leva `{ victory, boardPosition, results, bestUserId, killPoints, rollPoints }` e
+  `ServerShared/GlobalStats.RecordMatch` soma no placar global (OrderedDataStore `PlacarGlobal_Pontos_v1` +
+  DataStore `PlacarGlobal_Detalhes_v1`). No lobby, `LeaderboardService` lê o topo a cada 60 s (`Leaderboard_Get` /
+  `Leaderboard_Update`) e escreve no quadro do hub.
+- O tabuleiro tem um `Highlight` branco (`AlwaysOnTop`, só contorno).
+
 ## Controles
 
 | Ação | Teclado | Celular/console |
@@ -392,7 +426,7 @@ Fases: `Loading` → `WaitingPlayers` → `Intro` (primeira jogada liberada) →
 2. Alguém joga o dado: os dados rolam com física, a **peça única do grupo** anda, aparece o **enigma** do evento e
    começa a contagem de 10 s. As portas se abrem e o evento acontece **onde o tabuleiro está**.
 3. O tabuleiro pode ser carregado (preso nas costas) entre os cenários. A cada `ROLL_COOLDOWN` s o dado fica disponível.
-   Cada nova jogada **soma** um evento aos que já estão ativos (até `MAX_ACTIVE_EVENTS`).
+   Cada nova jogada **soma** um evento aos que já estão ativos; os eventos duram até o fim da partida.
 4. Chegar à última casa = vitória: todos os eventos acabam.
 5. Morreu ou passou da borda da ilha = eliminado (assiste aos outros). Todos eliminados = derrota.
 6. Armas espalhadas pelo mapa (facão, revólver, espingarda, dinamite) ajudam contra os inimigos. Não há fogo amigo.

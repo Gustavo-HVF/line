@@ -10,14 +10,19 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local ServerScriptService = game:GetService("ServerScriptService")
 local TeleportService = game:GetService("TeleportService")
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
+local CharacterService = require(ServerScriptService.ServerShared.CharacterService)
+local GlobalStats = require(ServerScriptService.ServerShared.GlobalStats)
+
 local BoardService = require(script.Parent.BoardService)
 local EventService = require(script.Parent.EventService)
+local MatchStats = require(script.Parent.MatchStats)
 
 local MatchService = {}
 
@@ -34,6 +39,7 @@ local CORPSE_TIME = 6 -- segundos até o corpo do eliminado sumir
 local TELEPORT_ATTEMPTS = 3
 local TELEPORT_PLAYER_RETRIES = 2
 local MAX_EXPECTED = 16
+local MAX_RESULTS = 8 -- linhas na tela de resultados
 local SPAWN_ATTEMPTS = 3 -- tentativas de criar o personagem
 local LOADING_LIMIT = 120 -- participante que não termina de carregar em 2 min sai da conta de vivos
 local DEFAULT_REASON = "Não resistiu aos perigos da selva"
@@ -272,56 +278,32 @@ function spawnCharacter(player: Player)
 		return
 	end
 	spawning[player] = true
-	local ok, err = pcall(function()
-		player:LoadCharacterAsync()
-	end)
-	if not ok and player.Parent and not player.Character then
-		-- Motores antigos sem LoadCharacterAsync: usa o método clássico.
-		ok, err = pcall(function()
-			(player :: any):LoadCharacter()
-		end)
-	end
+	-- Personagem R6 com a aparência do jogador (ServerShared/CharacterService). Os spawns do mapa já estão
+	-- na altura do HumanoidRootPart; só uma folga pequena.
+	local ok, result = pcall(CharacterService.Spawn, player, nextSpawnCFrame() + Vector3.new(0, 0.5, 0))
 	spawning[player] = nil
-	if not ok then
+	local character = if ok then result else nil
+	if not character or not player.Parent then
 		local attempts = (spawnAttempts[player] or 0) + 1
 		spawnAttempts[player] = attempts
 		warn(
 			("[MatchService] Falha ao criar o personagem de %s (tentativa %d): %s"):format(
 				player.Name,
 				attempts,
-				tostring(err)
+				tostring(result)
 			)
 		)
-		if attempts < SPAWN_ATTEMPTS then
-			task.delay(2, spawnCharacter, player)
-		end
-		return
-	end
-	local character = player.Character
-	if player.Parent and not character then
-		-- Garantia: se o carregamento devolveu antes de o personagem existir, espera um pouco por ele.
-		local deadline = os.clock() + 5
-		while player.Parent and not player.Character and os.clock() < deadline do
-			task.wait(0.1)
-		end
-		character = player.Character
-	end
-	if not player.Parent or not character then
-		local attempts = (spawnAttempts[player] or 0) + 1
-		spawnAttempts[player] = attempts
 		if player.Parent and attempts < SPAWN_ATTEMPTS then
 			task.delay(2, spawnCharacter, player)
 		end
 		return
 	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 5)
-	if not humanoid or not humanoid:IsA("Humanoid") then
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
 		warn(("[MatchService] Personagem de %s sem Humanoid."):format(player.Name))
 		return
 	end
 	record.spawned = true
-	-- Os spawns do mapa já estão na altura do HumanoidRootPart; só uma folga pequena.
-	character:PivotTo(nextSpawnCFrame() + Vector3.new(0, 0.5, 0))
 	humanoid.MaxHealth = GameConfig.PLAYER_MAX_HEALTH
 	humanoid.Health = GameConfig.PLAYER_MAX_HEALTH
 	player:SetAttribute("LastDamageSource", nil)
@@ -482,6 +464,33 @@ local function endMatch(victory: boolean)
 			warn("[MatchService] Erro ao remover os NPCs: " .. tostring(err))
 		end
 	end
+	-- Resultados: cutscene com o melhor da partida (todos os clientes) e placar global (DataStore).
+	local okResults, results = pcall(MatchStats.Results)
+	if not okResults then
+		warn("[MatchService] Erro ao calcular os resultados: " .. tostring(results))
+		results = {}
+	end
+	local shown = {}
+	local recorded = {}
+	for _, entry in results do
+		local record = participants[entry.userId]
+		if record then
+			if #shown < MAX_RESULTS then
+				table.insert(shown, entry)
+			end
+			table.insert(recorded, entry)
+		end
+	end
+	remotes.cutscene:FireAllClients({
+		victory = victory,
+		boardPosition = BoardService.GetBoardPosition(),
+		results = shown,
+		bestUserId = shown[1] and shown[1].userId or nil,
+		killPoints = MatchStats.KILL_POINTS,
+		rollPoints = MatchStats.ROLL_POINTS,
+	})
+	task.spawn(GlobalStats.RecordMatch, recorded, victory)
+
 	if victory then
 		setPhase("Victory", "O tabuleiro foi vencido!")
 		SoundUtil.Play("Victory", { Group = "Music", Volume = 0.8 })
@@ -689,7 +698,9 @@ function MatchService.Init(info)
 	remotes.riddle = Net.event(Net.Names.Board_Riddle)
 	remotes.eliminated = Net.event(Net.Names.Player_Eliminated)
 	remotes.notify = Net.event(Net.Names.Notify)
+	remotes.cutscene = Net.event(Net.Names.Game_EndCutscene)
 
+	MatchStats.Init()
 	MapBuilder = tryRequire("Map", "MapBuilder")
 	NPCService = tryRequire("NPC", "NPCService")
 

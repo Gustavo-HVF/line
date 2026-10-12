@@ -115,9 +115,950 @@ return SoundUtil
       </Item>
       <Item class="Folder" referent="5">
         <Properties>
-          <string name="Name">Config</string>
+          <string name="Name">Character</string>
         </Properties>
         <Item class="ModuleScript" referent="6">
+          <Properties>
+            <string name="Name">FirstPerson</string>
+            <string name="Source"><![CDATA[--!nonstrict
+-- Câmera em primeira pessoa (somente cliente).
+--   * CameraMode = LockFirstPerson;
+--   * o próprio corpo continua visível (braços, tronco, pernas e ferramentas); só a cabeça, o rosto e os
+--     acessórios somem, para não taparem a visão;
+--   * a câmera fica um pouco à frente do rosto (Humanoid.CameraOffset) e balança com os passos
+--     (mais forte correndo), com um "afundar" ao cair de altura.
+--
+--   FirstPerson.Enable()   -- hub do lobby e partida
+--   FirstPerson.Disable()  -- menu, espectador e cutscenes (volta à câmera clássica)
+--   FirstPerson.IsEnabled(): boolean
+--   FirstPerson.SetClimbing(climbing)  -- encostado na parede: a câmera não avança (não atravessa a parede)
+--
+-- O balanço segue o padrão do FxClient: desfaz o deslocamento antes da câmera do Roblox atualizar e
+-- reaplica depois, para não acumular rotação de um frame para o outro.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local FirstPerson = {}
+
+local UNDO_STEP = "SelvaPrimeiraPessoaDesfaz"
+local APPLY_STEP = "SelvaPrimeiraPessoa"
+local BODY_STEP = "SelvaCorpoVisivel"
+local FORWARD_OFFSET = 0.7 -- studs à frente do rosto
+local RUN_SPEED = 20
+local DEFAULT_MAX_ZOOM = 12
+
+local LocalPlayer = Players.LocalPlayer
+
+local enabled = false
+local climbing = false
+local applied = CFrame.identity
+local bobPhase = 0
+local wasAirborne = false
+local fallSpeed = 0
+local landDip = 0
+local smoothedSpeed = 0
+
+local hiddenParts: { [BasePart]: boolean } = {}
+local visibleParts: { [BasePart]: boolean } = {}
+local trackedCharacter: Model? = nil
+local characterConnections: { RBXScriptConnection } = {}
+
+-- Corpo visível -------------------------------------------------------------------------------------
+
+local function shouldHide(part: BasePart, character: Model): boolean
+	if part.Name == "Head" and part.Parent == character then
+		return true
+	end
+	return part:FindFirstAncestorOfClass("Accessory") ~= nil or part:FindFirstAncestorOfClass("Accoutrement") ~= nil
+end
+
+local function classify(instance: Instance, character: Model)
+	if instance:IsA("BasePart") then
+		if shouldHide(instance, character) then
+			hiddenParts[instance] = true
+		elseif instance.Name ~= "HumanoidRootPart" then
+			visibleParts[instance] = true
+		end
+	end
+end
+
+local function clearCharacter()
+	for _, connection in characterConnections do
+		connection:Disconnect()
+	end
+	table.clear(characterConnections)
+	for part in hiddenParts do
+		part.LocalTransparencyModifier = 0
+	end
+	table.clear(hiddenParts)
+	table.clear(visibleParts)
+	trackedCharacter = nil
+end
+
+local function trackCharacter(character: Model?)
+	if character == trackedCharacter then
+		return
+	end
+	clearCharacter()
+	if not character then
+		return
+	end
+	trackedCharacter = character
+	for _, descendant in character:GetDescendants() do
+		classify(descendant, character)
+	end
+	table.insert(
+		characterConnections,
+		character.DescendantAdded:Connect(function(descendant)
+			classify(descendant, character)
+		end)
+	)
+	table.insert(
+		characterConnections,
+		character.DescendantRemoving:Connect(function(descendant)
+			if descendant:IsA("BasePart") then
+				hiddenParts[descendant] = nil
+				visibleParts[descendant] = nil
+			end
+		end)
+	)
+end
+
+local function updateBody()
+	local character = LocalPlayer.Character
+	trackCharacter(character)
+	if not character then
+		return
+	end
+	local camera = workspace.CurrentCamera
+	local head = character:FindFirstChild("Head")
+	-- Só esconde a cabeça quando a câmera está realmente nela (primeira pessoa de verdade).
+	local inside = camera ~= nil
+		and head ~= nil
+		and head:IsA("BasePart")
+		and (camera.CFrame.Position - head.Position).Magnitude < 2.5
+	for part in hiddenParts do
+		part.LocalTransparencyModifier = if inside then 1 else 0
+	end
+	for part in visibleParts do
+		part.LocalTransparencyModifier = 0
+	end
+	-- O rosto (Decal na cabeça) some junto com a cabeça.
+	if head then
+		local face = head:FindFirstChildOfClass("Decal")
+		if face then
+			face.LocalTransparencyModifier = if inside then 1 else 0
+		end
+	end
+end
+
+-- Balanço da câmera ----------------------------------------------------------------------------------
+
+local function undoBob()
+	local camera = workspace.CurrentCamera
+	if camera and applied ~= CFrame.identity then
+		camera.CFrame = camera.CFrame * applied:Inverse()
+	end
+	applied = CFrame.identity
+end
+
+local function applyBob(dt: number)
+	local camera = workspace.CurrentCamera
+	local character = LocalPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if
+		not camera
+		or camera.CameraType ~= Enum.CameraType.Custom
+		or not humanoid
+		or humanoid.Health <= 0
+		or not root
+		or not root:IsA("BasePart")
+	then
+		return
+	end
+	dt = math.min(dt, 0.1)
+	humanoid.CameraOffset = Vector3.new(0, 0, if climbing then 0 else -FORWARD_OFFSET)
+
+	local velocity = root.AssemblyLinearVelocity
+	local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+	local airborne = humanoid.FloorMaterial == Enum.Material.Air
+	if airborne then
+		fallSpeed = math.min(fallSpeed, velocity.Y)
+	elseif wasAirborne then
+		-- pousou: afunda proporcional à velocidade da queda
+		landDip = math.max(landDip, math.clamp(-fallSpeed / 70, 0, 0.7))
+		fallSpeed = 0
+	end
+	wasAirborne = airborne
+	landDip = math.max(landDip - dt * 2.2, 0)
+
+	local target = if airborne or climbing then 0 else speed
+	smoothedSpeed += (target - smoothedSpeed) * math.min(dt * 10, 1)
+	local running = smoothedSpeed > RUN_SPEED - 2
+	bobPhase += dt * smoothedSpeed * (if running then 0.62 else 0.75)
+	local intensity = math.clamp(smoothedSpeed / 16, 0, 1.5)
+	local amplitude = if running then 0.16 else 0.1
+
+	local now = os.clock()
+	local breathe = math.sin(now * 1.6) * 0.025
+	local bobY = math.abs(math.sin(bobPhase)) * amplitude * intensity
+	local swayX = math.cos(bobPhase) * amplitude * 0.6 * intensity
+	local roll = math.cos(bobPhase) * math.rad(if running then 1.1 else 0.6) * intensity
+	if climbing then
+		bobY = math.sin(now * 7) * 0.05 * math.clamp(math.abs(velocity.Y) / 8, 0, 1)
+	end
+
+	local offset = CFrame.new(swayX, bobY + breathe - landDip, 0) * CFrame.Angles(0, 0, roll)
+	camera.CFrame = camera.CFrame * offset
+	applied = offset
+end
+
+-- API ---------------------------------------------------------------------------------------------
+
+function FirstPerson.Enable()
+	if enabled then
+		return
+	end
+	enabled = true
+	LocalPlayer.CameraMode = Enum.CameraMode.LockFirstPerson
+	LocalPlayer.CameraMinZoomDistance = 0.5
+	applied = CFrame.identity
+	RunService:BindToRenderStep(UNDO_STEP, Enum.RenderPriority.Camera.Value - 2, undoBob)
+	RunService:BindToRenderStep(APPLY_STEP, Enum.RenderPriority.Camera.Value + 2, applyBob)
+	RunService:BindToRenderStep(BODY_STEP, Enum.RenderPriority.Camera.Value + 3, updateBody)
+end
+
+function FirstPerson.Disable()
+	if not enabled then
+		return
+	end
+	enabled = false
+	RunService:UnbindFromRenderStep(UNDO_STEP)
+	RunService:UnbindFromRenderStep(APPLY_STEP)
+	RunService:UnbindFromRenderStep(BODY_STEP)
+	undoBob()
+	clearCharacter()
+	LocalPlayer.CameraMode = Enum.CameraMode.Classic
+	LocalPlayer.CameraMaxZoomDistance = DEFAULT_MAX_ZOOM
+	local character = LocalPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.CameraOffset = Vector3.zero
+	end
+end
+
+function FirstPerson.IsEnabled(): boolean
+	return enabled
+end
+
+function FirstPerson.SetClimbing(value: boolean)
+	climbing = value == true
+end
+
+return FirstPerson
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="7">
+          <Properties>
+            <string name="Name">Movement</string>
+            <string name="Source"><![CDATA[--!nonstrict
+-- Corrida com estamina e escalada de paredes (somente cliente).
+--   * Correr: segure Shift (PC), aperte L3 (controle) ou toque em "Correr" (celular, liga/desliga).
+--     Gasta estamina; sem estamina, só volta a correr depois de recuperar um pouco.
+--   * Escalar: olhe para uma parede e segure Pular. Sobe enquanto houver estamina; ao chegar no topo,
+--     dá um impulso para subir na borda. Soltar o pulo ou acabar a estamina = cai.
+--   * Barra de estamina logo abaixo da mira (some quando está cheia).
+--
+--   Movement.Enable(opts?)   opts.climb: boolean? (padrão true)
+--   Movement.Disable()
+--   Movement.GetStamina(): number  (0..100)
+--
+-- Velocidade: o servidor pode mudar o WalkSpeed (lentidão de eventos e NPCs). O valor que vem do servidor é
+-- a base; correr multiplica a base, e personagem lento não corre.
+
+local ContextActionService = game:GetService("ContextActionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+local Net = require(ReplicatedStorage.Shared.Net)
+local UIKit = require(ReplicatedStorage.Shared.UI.UIKit)
+
+local FirstPerson = require(script.Parent.FirstPerson)
+local R6Animator = require(script.Parent.R6Animator)
+
+local Movement = {}
+
+local SPRINT_ACTION = "SelvaCorrer"
+local STAMINA_MAX = 100
+local RUN_MULTIPLIER = 1.65
+local MIN_RUN_BASE = 14 -- base menor que isto (lento) não corre
+local RUN_DRAIN = 16 -- por segundo
+local CLIMB_DRAIN = 20
+local REGEN = 22
+local REGEN_DELAY = 0.9
+local RESUME_AT = 25 -- depois de esgotar, só volta a correr com isto
+local MIN_TO_CLIMB = 8
+local CLIMB_SPEED = 11
+local CLIMB_SIDE_SPEED = 5
+local CLIMB_STICK = 3
+local WALL_REACH = 2.4
+local JUMP_HOLD_WINDOW = 0.22
+local MANTLE_UP = 30
+local MANTLE_FORWARD = 12
+
+local LocalPlayer = Players.LocalPlayer
+
+local enabled = false
+local climbAllowed = true
+local stamina = STAMINA_MAX
+local lastSpend = 0
+local exhausted = false
+local sprintHeld = false -- teclado: segurar
+local sprintToggled = false -- celular/controle: liga/desliga
+local running = false
+local climbing = false
+local climbNormal = Vector3.zero
+local jumpRequestedAt = -math.huge
+local baseSpeed = 16
+local lastWrittenSpeed: number? = nil
+local sentState = "none"
+local connections: { RBXScriptConnection } = {}
+local characterConnections: { RBXScriptConnection } = {}
+local moveRemote: RemoteEvent? = nil
+
+local ui = nil
+local barVisible = false
+
+-- Interface ----------------------------------------------------------------------------------------
+
+local function ensureUI()
+	if ui then
+		return ui
+	end
+	local gui = UIKit.ScreenGui("Estamina", 4)
+	local holder = UIKit.Create("CanvasGroup", {
+		Name = "Barra",
+		-- logo abaixo da mira: fica no campo de visão sem cobrir o painel da arma nem a barra de itens
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0.5, 70),
+		Size = UDim2.fromOffset(190, 10),
+		BackgroundColor3 = Color3.fromRGB(18, 22, 16),
+		BackgroundTransparency = 0.25,
+		BorderSizePixel = 0,
+		GroupTransparency = 1,
+		Parent = gui,
+	}) :: CanvasGroup
+	UIKit.Corner(holder, UDim.new(1, 0))
+	UIKit.Stroke(holder, Color3.fromRGB(222, 180, 70), 1)
+	local fill = UIKit.Create("Frame", {
+		Name = "Preenchimento",
+		BackgroundColor3 = Color3.fromRGB(120, 200, 90),
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		Parent = holder,
+	}) :: Frame
+	UIKit.Corner(fill, UDim.new(1, 0))
+	ui = { gui = gui, holder = holder, fill = fill }
+	return ui
+end
+
+local function setBarVisible(visible: boolean)
+	if visible == barVisible or not ui then
+		return
+	end
+	barVisible = visible
+	TweenService:Create(ui.holder, TweenInfo.new(if visible then 0.15 else 0.6), {
+		GroupTransparency = if visible then 0 else 1,
+	}):Play()
+end
+
+local function updateBar()
+	local view = ensureUI()
+	local ratio = stamina / STAMINA_MAX
+	view.fill.Size = UDim2.fromScale(math.max(ratio, 0.001), 1)
+	local color
+	if exhausted then
+		color = Color3.fromRGB(200, 70, 50)
+	elseif ratio < 0.3 then
+		color = Color3.fromRGB(226, 150, 40)
+	else
+		color = Color3.fromRGB(120, 200, 90)
+	end
+	view.fill.BackgroundColor3 = color
+	setBarVisible(stamina < STAMINA_MAX - 0.5 or running or climbing)
+end
+
+-- Estado replicado (para os outros verem a animação de escalada) ------------------------------------
+
+local function sendState(state: string)
+	if state == sentState then
+		return
+	end
+	sentState = state
+	local remote = moveRemote or Net.event(Net.Names.Char_MoveState)
+	moveRemote = remote
+	remote:FireServer(state)
+end
+
+local function setClimbing(value: boolean)
+	if climbing == value then
+		return
+	end
+	climbing = value
+	R6Animator.SetLocalClimbing(value)
+	FirstPerson.SetClimbing(value)
+	sendState(if value then "climb" else "none")
+end
+
+-- Personagem ---------------------------------------------------------------------------------------
+
+local function getCharacter(): (Model?, Humanoid?, BasePart?)
+	local character = LocalPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not humanoid or humanoid.Health <= 0 or not root or not root:IsA("BasePart") then
+		return nil, nil, nil
+	end
+	return character, humanoid, root
+end
+
+local function writeSpeed(humanoid: Humanoid, speed: number)
+	if math.abs(humanoid.WalkSpeed - speed) > 0.01 then
+		lastWrittenSpeed = speed
+		humanoid.WalkSpeed = speed
+	end
+end
+
+local function disconnectCharacter()
+	for _, connection in characterConnections do
+		connection:Disconnect()
+	end
+	table.clear(characterConnections)
+end
+
+local function onCharacter(character: Model)
+	disconnectCharacter()
+	setClimbing(false)
+	running = false
+	stamina = STAMINA_MAX
+	exhausted = false
+	lastWrittenSpeed = nil
+	local humanoid = character:WaitForChild("Humanoid", 10)
+	if not humanoid or not humanoid:IsA("Humanoid") or LocalPlayer.Character ~= character then
+		return
+	end
+	baseSpeed = humanoid.WalkSpeed
+	table.insert(
+		characterConnections,
+		humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+			-- Valor diferente do que este script escreveu = veio do servidor (lentidão ou fim dela).
+			if lastWrittenSpeed == nil or math.abs(humanoid.WalkSpeed - lastWrittenSpeed) > 0.01 then
+				baseSpeed = humanoid.WalkSpeed
+				lastWrittenSpeed = nil
+			end
+		end)
+	)
+end
+
+-- Escalada -----------------------------------------------------------------------------------------
+
+local function wallRay(character: Model, origin: Vector3, direction: Vector3): RaycastResult?
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+	return workspace:Raycast(origin, direction, params)
+end
+
+local function flatLook(root: BasePart): Vector3
+	local look = root.CFrame.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	if flat.Magnitude < 1e-3 then
+		return Vector3.new(0, 0, -1)
+	end
+	return flat.Unit
+end
+
+local function isWall(result: RaycastResult?): boolean
+	return result ~= nil and math.abs(result.Normal.Y) < 0.35
+end
+
+local function jumpHeld(): boolean
+	return os.clock() - jumpRequestedAt < JUMP_HOLD_WINDOW
+end
+
+local function stepClimb(dt: number, character: Model, humanoid: Humanoid, root: BasePart)
+	if not climbAllowed or humanoid.Sit or humanoid:GetState() == Enum.HumanoidStateType.Swimming then
+		setClimbing(false)
+		return
+	end
+	local look = flatLook(root)
+	if not climbing then
+		if not jumpHeld() or stamina < MIN_TO_CLIMB then
+			return
+		end
+		local hit = wallRay(character, root.Position, look * WALL_REACH)
+		if not isWall(hit) then
+			return
+		end
+		climbNormal = Vector3.new(hit.Normal.X, 0, hit.Normal.Z).Unit
+		setClimbing(true)
+	end
+
+	local intoWall = -climbNormal
+	local chest = wallRay(character, root.Position, intoWall * (WALL_REACH + 0.6))
+	if not isWall(chest) then
+		-- passou do topo: um empurrãozinho para subir na borda
+		root.AssemblyLinearVelocity = Vector3.new(0, MANTLE_UP * 0.6, 0) + intoWall * MANTLE_FORWARD
+		setClimbing(false)
+		return
+	end
+	climbNormal = Vector3.new(chest.Normal.X, 0, chest.Normal.Z).Unit
+	local head = wallRay(character, root.Position + Vector3.new(0, 2.6, 0), intoWall * (WALL_REACH + 0.6))
+	if not head then
+		root.AssemblyLinearVelocity = Vector3.new(0, MANTLE_UP, 0) + intoWall * MANTLE_FORWARD
+		setClimbing(false)
+		return
+	end
+	if not jumpHeld() or stamina <= 0 then
+		setClimbing(false)
+		return
+	end
+
+	stamina = math.max(stamina - CLIMB_DRAIN * dt, 0)
+	lastSpend = os.clock()
+	if stamina <= 0 then
+		exhausted = true
+	end
+	-- anda de lado ao longo da parede conforme o analógico
+	local move = humanoid.MoveDirection
+	local side = move - climbNormal * move:Dot(climbNormal)
+	side = Vector3.new(side.X, 0, side.Z)
+	local lateral = if side.Magnitude > 0.05
+		then side.Unit * CLIMB_SIDE_SPEED * math.min(side.Magnitude, 1)
+		else Vector3.zero
+	root.AssemblyLinearVelocity = Vector3.new(0, CLIMB_SPEED, 0) + lateral + intoWall * CLIMB_STICK
+end
+
+-- Corrida ------------------------------------------------------------------------------------------
+
+local function stepRun(dt: number, humanoid: Humanoid)
+	local wants = sprintHeld or sprintToggled
+	local moving = humanoid.MoveDirection.Magnitude > 0.1
+	if exhausted and stamina >= RESUME_AT then
+		exhausted = false
+	end
+	running = wants and moving and not climbing and not exhausted and stamina > 0 and baseSpeed >= MIN_RUN_BASE
+	if running then
+		stamina = math.max(stamina - RUN_DRAIN * dt, 0)
+		lastSpend = os.clock()
+		if stamina <= 0 then
+			exhausted = true
+			sprintToggled = false
+			running = false
+		end
+	elseif not climbing and os.clock() - lastSpend > REGEN_DELAY then
+		stamina = math.min(stamina + REGEN * dt, STAMINA_MAX)
+	end
+	writeSpeed(humanoid, if running then baseSpeed * RUN_MULTIPLIER else baseSpeed)
+end
+
+local function step(dt: number)
+	dt = math.min(dt, 0.1)
+	local character, humanoid, root = getCharacter()
+	if not character or not humanoid or not root then
+		setClimbing(false)
+		running = false
+		return
+	end
+	stepClimb(dt, character, humanoid, root)
+	stepRun(dt, humanoid)
+	updateBar()
+end
+
+-- Entrada ------------------------------------------------------------------------------------------
+
+local function onSprint(_name: string, inputState: Enum.UserInputState, input: InputObject)
+	if input.UserInputType == Enum.UserInputType.Keyboard then
+		sprintHeld = inputState == Enum.UserInputState.Begin
+	elseif inputState == Enum.UserInputState.Begin then
+		sprintToggled = not sprintToggled
+	end
+	-- Sink: o Shift não liga também a trava de câmera ("shift lock") do Roblox.
+	return Enum.ContextActionResult.Sink
+end
+
+-- API ---------------------------------------------------------------------------------------------
+
+function Movement.Enable(opts: { [string]: any }?)
+	climbAllowed = not (opts and opts.climb == false)
+	if enabled then
+		return
+	end
+	enabled = true
+	ensureUI()
+	sprintHeld = false
+	sprintToggled = false
+	ContextActionService:BindAction(
+		SPRINT_ACTION,
+		onSprint,
+		true,
+		Enum.KeyCode.LeftShift,
+		Enum.KeyCode.RightShift,
+		Enum.KeyCode.ButtonL3
+	)
+	ContextActionService:SetTitle(SPRINT_ACTION, "Correr")
+	table.insert(
+		connections,
+		UserInputService.JumpRequest:Connect(function()
+			jumpRequestedAt = os.clock()
+		end)
+	)
+	table.insert(connections, LocalPlayer.CharacterAdded:Connect(onCharacter))
+	table.insert(connections, RunService.PreSimulation:Connect(step))
+	if LocalPlayer.Character then
+		task.spawn(onCharacter, LocalPlayer.Character)
+	end
+end
+
+function Movement.Disable()
+	if not enabled then
+		return
+	end
+	enabled = false
+	ContextActionService:UnbindAction(SPRINT_ACTION)
+	for _, connection in connections do
+		connection:Disconnect()
+	end
+	table.clear(connections)
+	disconnectCharacter()
+	setClimbing(false)
+	running = false
+	sprintHeld = false
+	sprintToggled = false
+	local _, humanoid = getCharacter()
+	if humanoid then
+		writeSpeed(humanoid, baseSpeed)
+	end
+	lastWrittenSpeed = nil
+	setBarVisible(false)
+end
+
+function Movement.GetStamina(): number
+	return stamina
+end
+
+return Movement
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="8">
+          <Properties>
+            <string name="Name">R6Animator</string>
+            <string name="Source"><![CDATA[--!nonstrict
+-- Animação procedural dos personagens R6 (somente cliente). Não usa assets de animação: cada cliente
+-- calcula a pose de TODOS os personagens a partir da velocidade, do estado e do que estão segurando, e
+-- escreve em Motor6D.Transform (que não replica). Assim todo mundo vê todo mundo animado.
+--
+--   R6Animator.Init()                          -- anima os personagens dos jogadores (idempotente)
+--   R6Animator.Register(model, opts?): () -> () -- anima um modelo extra (ex.: boneco do menu)
+--       opts.pose = "idle" | "menu"            -- "menu": parado, olhando em volta devagar
+--   R6Animator.SetLocalClimbing(climbing)      -- o Movement avisa na hora (o atributo do servidor demora)
+--
+-- Poses: parado (respiração), andando, correndo (inclina e balança mais), no ar (subindo/caindo),
+-- escalando (braços alternando acima da cabeça) e segurando uma ferramenta (braço direito à frente).
+-- Eixos dos Motor6D do R6: ombros e quadris giram em Z (direito: + = para frente; esquerdo: + = para trás);
+-- RootJoint/Neck: X + = inclina para frente, Z = para cima.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local R6Animator = {}
+
+local RUN_SPEED = 20 -- acima disto (studs/s) a pose é de corrida
+local WALK_STRIDE = 7.5 -- studs por ciclo de passo andando
+local RUN_STRIDE = 11
+local AIR_SPEED = 4 -- |velocidade vertical| acima disto = no ar
+local SMOOTHING = 14
+local HALF_PI = math.pi / 2
+
+type Rig = {
+	model: Model,
+	humanoid: Humanoid,
+	root: BasePart,
+	joints: { [string]: Motor6D },
+	pose: string,
+	phase: number,
+	current: { [string]: number },
+	isLocal: boolean,
+	airTime: number,
+}
+
+local rigs: { [Model]: Rig } = {}
+local initialized = false
+local localClimbing = false
+local LocalPlayer = Players.LocalPlayer
+
+local JOINT_NAMES = {
+	rootJoint = { "HumanoidRootPart", "RootJoint" },
+	neck = { "Torso", "Neck" },
+	rightShoulder = { "Torso", "Right Shoulder" },
+	leftShoulder = { "Torso", "Left Shoulder" },
+	rightHip = { "Torso", "Right Hip" },
+	leftHip = { "Torso", "Left Hip" },
+}
+
+-- Valores animados (todos suavizados).
+local KEYS = { "rs", "ls", "rh", "lh", "lean", "bob", "neckPitch", "neckYaw" }
+
+local function findJoints(model: Model): { [string]: Motor6D }?
+	local joints = {}
+	for key, path in JOINT_NAMES do
+		local parent = model:FindFirstChild(path[1])
+		local joint = parent and parent:FindFirstChild(path[2])
+		if not joint or not joint:IsA("Motor6D") then
+			return nil
+		end
+		joints[key] = joint
+	end
+	return joints
+end
+
+local function unregister(model: Model)
+	local rig = rigs[model]
+	if not rig then
+		return
+	end
+	rigs[model] = nil
+	for _, joint in rig.joints do
+		if joint.Parent then
+			joint.Transform = CFrame.identity
+		end
+	end
+end
+
+function R6Animator.Register(model: Model, opts: { [string]: any }?): () -> ()
+	if rigs[model] then
+		unregister(model)
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local root = model:FindFirstChild("HumanoidRootPart")
+	if not humanoid or humanoid.RigType ~= Enum.HumanoidRigType.R6 or not root or not root:IsA("BasePart") then
+		return function() end
+	end
+	local joints = findJoints(model)
+	if not joints then
+		return function() end
+	end
+	local current = {}
+	for _, key in KEYS do
+		current[key] = 0
+	end
+	rigs[model] = {
+		model = model,
+		humanoid = humanoid,
+		root = root,
+		joints = joints,
+		pose = opts and opts.pose or "auto",
+		phase = math.random() * math.pi * 2,
+		current = current,
+		isLocal = Players:GetPlayerFromCharacter(model) == LocalPlayer,
+		airTime = 0,
+	}
+	local connection
+	connection = model.AncestryChanged:Connect(function()
+		if not model:IsDescendantOf(workspace) then
+			connection:Disconnect()
+			unregister(model)
+		end
+	end)
+	return function()
+		connection:Disconnect()
+		unregister(model)
+	end
+end
+
+function R6Animator.SetLocalClimbing(climbing: boolean)
+	localClimbing = climbing == true
+end
+
+-- Pose alvo ------------------------------------------------------------------------------------
+
+local function isAirborne(rig: Rig, verticalSpeed: number): boolean
+	if rig.isLocal then
+		local state = rig.humanoid:GetState()
+		return state == Enum.HumanoidStateType.Freefall
+			or state == Enum.HumanoidStateType.Jumping
+			or rig.humanoid.FloorMaterial == Enum.Material.Air
+	end
+	return math.abs(verticalSpeed) > AIR_SPEED
+end
+
+local function targetPose(rig: Rig, dt: number, now: number): { [string]: number }
+	local t = {}
+	for _, key in KEYS do
+		t[key] = 0
+	end
+
+	if rig.pose == "menu" then
+		t.rs = math.sin(now * 1.1) * 0.05
+		t.ls = math.sin(now * 1.1 + 1) * 0.05
+		t.bob = math.sin(now * 1.6) * 0.04
+		t.neckYaw = math.sin(now * 0.37) * 0.35
+		t.neckPitch = 0.12 + math.sin(now * 0.23) * 0.06
+		return t
+	end
+
+	local velocity = rig.root.AssemblyLinearVelocity
+	local horizontal = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+	local climbing = if rig.isLocal then localClimbing else rig.model:GetAttribute("MoveState") == "climb"
+	local holding = rig.model:FindFirstChildOfClass("Tool") ~= nil
+
+	if climbing then
+		rig.phase += dt * math.clamp(math.abs(velocity.Y) * 0.7 + 2, 2, 10)
+		local swing = math.sin(rig.phase)
+		local reach = math.pi - 0.35
+		t.rs = reach + swing * 0.4
+		t.ls = -reach + swing * 0.4
+		t.rh = 0.55 + swing * 0.45
+		t.lh = -0.55 + swing * 0.45
+		t.lean = -0.08
+		t.neckPitch = -0.35
+		return t
+	end
+
+	local airborne = isAirborne(rig, velocity.Y)
+	if airborne then
+		rig.airTime += dt
+	else
+		rig.airTime = 0
+	end
+
+	if airborne and rig.airTime > 0.08 then
+		if velocity.Y > 0 then
+			-- subindo: braços para cima, uma perna dobrada à frente
+			t.rs = 2.4
+			t.ls = -2.4
+			t.rh = 0.5
+			t.lh = 0.3
+		else
+			-- caindo: braços abertos à frente, pernas soltas
+			local flail = math.sin(now * 9) * 0.12
+			t.rs = 1.3 + flail
+			t.ls = -1.3 + flail
+			t.rh = 0.25
+			t.lh = -0.25
+			t.lean = -0.1
+		end
+	elseif horizontal > 0.6 then
+		local running = horizontal >= RUN_SPEED
+		local stride = if running then RUN_STRIDE else WALK_STRIDE
+		rig.phase += dt * (horizontal / stride) * math.pi * 2
+		local amount = math.clamp(horizontal / 16, 0.35, 1)
+		local legAmp = (if running then 1.0 else 0.6) * amount
+		local armAmp = (if running then 1.05 else 0.55) * amount
+		local swing = math.sin(rig.phase)
+		t.rs = swing * armAmp + (if running then 0.25 else 0)
+		t.ls = swing * armAmp - (if running then 0.25 else 0)
+		t.rh = -swing * legAmp
+		t.lh = -swing * legAmp
+		t.lean = if running then 0.22 else 0.05
+		t.bob = math.abs(math.cos(rig.phase)) * (if running then 0.32 else 0.14)
+		t.neckPitch = if running then -0.12 else 0
+	else
+		-- parado: respiração
+		t.rs = math.sin(now * 1.4) * 0.04
+		t.ls = math.sin(now * 1.4) * 0.04
+		t.bob = math.sin(now * 1.8) * 0.035
+		t.neckPitch = math.sin(now * 0.5) * 0.03
+	end
+
+	if holding then
+		t.rs = HALF_PI + t.rs * 0.1
+	end
+	return t
+end
+
+-- Aplicação ------------------------------------------------------------------------------------
+
+local function apply(rig: Rig, dt: number, now: number)
+	local target = targetPose(rig, dt, now)
+	local alpha = 1 - math.exp(-SMOOTHING * dt)
+	local c = rig.current
+	for _, key in KEYS do
+		c[key] += (target[key] - c[key]) * alpha
+	end
+	local j = rig.joints
+	j.rightShoulder.Transform = CFrame.Angles(0, 0, c.rs)
+	j.leftShoulder.Transform = CFrame.Angles(0, 0, c.ls)
+	j.rightHip.Transform = CFrame.Angles(0, 0, c.rh)
+	j.leftHip.Transform = CFrame.Angles(0, 0, c.lh)
+	j.rootJoint.Transform = CFrame.new(0, 0, c.bob) * CFrame.Angles(c.lean, 0, 0)
+	j.neck.Transform = CFrame.Angles(c.neckPitch, 0, c.neckYaw)
+end
+
+local function step(dt: number)
+	local now = os.clock()
+	for model, rig in rigs do
+		if not model.Parent then
+			rigs[model] = nil
+		elseif rig.humanoid.Health > 0 and rig.root.Parent then
+			apply(rig, math.min(dt, 0.1), now)
+		end
+	end
+end
+
+local function watchPlayer(player: Player)
+	local function onCharacter(character: Model)
+		task.spawn(function()
+			-- As juntas podem chegar alguns frames depois do modelo.
+			local torso = character:WaitForChild("Torso", 10)
+			local root = character:WaitForChild("HumanoidRootPart", 10)
+			if not torso or not root then
+				return
+			end
+			torso:WaitForChild("Right Hip", 5)
+			root:WaitForChild("RootJoint", 5)
+			if character.Parent and player.Character == character then
+				R6Animator.Register(character)
+			end
+		end)
+	end
+	player.CharacterAdded:Connect(onCharacter)
+	if player.Character then
+		onCharacter(player.Character)
+	end
+end
+
+function R6Animator.Init()
+	if initialized then
+		return
+	end
+	initialized = true
+	Players.PlayerAdded:Connect(watchPlayer)
+	for _, player in Players:GetPlayers() do
+		watchPlayer(player)
+	end
+	RunService.PreSimulation:Connect(step)
+end
+
+return R6Animator
+]]></string>
+          </Properties>
+        </Item>
+      </Item>
+      <Item class="Folder" referent="9">
+        <Properties>
+          <string name="Name">Config</string>
+        </Properties>
+        <Item class="ModuleScript" referent="10">
           <Properties>
             <string name="Name">GameConfig</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -138,9 +1079,10 @@ GameConfig.EVENT_WARNING_TIME = 5 -- tempo entre o enigma e o evento nas jogadas
 GameConfig.ROLL_COOLDOWN = 60 -- segundos entre jogadas do dado
 GameConfig.BOARD_SPACES = 40 -- casas do tabuleiro (a última é a vitória)
 GameConfig.DICE_COUNT = 2
-GameConfig.MAX_ACTIVE_EVENTS = 4 -- eventos simultâneos (somados); o mais antigo termina se passar disso
 GameConfig.EVENT_DEFAULT_RADIUS = 60
-GameConfig.RETURN_TO_LOBBY_DELAY = 15
+GameConfig.MAX_EVENT_SITES = 14 -- focos de eventos ao mesmo tempo no mapa todo (os eventos duram até o fim)
+GameConfig.PHYSICAL_EVENT_SITES = 3 -- cada evento físico acontece em vários pontos do mapa ao mesmo tempo
+GameConfig.RETURN_TO_LOBBY_DELAY = 24 -- inclui a cutscene final e a tela de resultados
 GameConfig.PLAYER_MAX_HEALTH = 100
 
 -- Ilha / mapa ---------------------------------------------------------------
@@ -186,7 +1128,7 @@ return GameConfig
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="7">
+        <Item class="ModuleScript" referent="11">
           <Properties>
             <string name="Name">Places</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -206,7 +1148,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="8">
+        <Item class="ModuleScript" referent="12">
           <Properties>
             <string name="Name">Sounds</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -265,7 +1207,7 @@ return {
           </Properties>
         </Item>
       </Item>
-      <Item class="ModuleScript" referent="9">
+      <Item class="ModuleScript" referent="13">
         <Properties>
           <string name="Name">Net</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -314,6 +1256,14 @@ Net.Names = {
 	Weapon_Throw = "Weapon_Throw", -- C->S: (tool: Tool, target: Vector3)
 	Weapon_Reload = "Weapon_Reload", -- C->S: (tool: Tool)
 	Notify = "Notify", -- S->C: (text: string, kind: "info"|"warning"|"danger"|"success"?)
+	Game_EndCutscene = "Game_EndCutscene", -- S->C: (EndCutscenePayload) cutscene do fim + melhor jogador
+
+	-- Personagem (lobby e jogo)
+	Char_MoveState = "Char_MoveState", -- C->S: (state: "none"|"climb") vira o atributo MoveState do personagem
+
+	-- Placar global (lobby)
+	Leaderboard_Get = "Leaderboard_Get", -- RemoteFunction: () -> LeaderboardPayload
+	Leaderboard_Update = "Leaderboard_Update", -- S->C: (LeaderboardPayload)
 }
 
 local function getFolder(): Folder
@@ -367,7 +1317,7 @@ return Net
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="10">
+      <Item class="ModuleScript" referent="14">
         <Properties>
           <string name="Name">PlaceMode</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -448,11 +1398,11 @@ return PlaceMode
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="11">
+      <Item class="Folder" referent="15">
         <Properties>
           <string name="Name">Settings</string>
         </Properties>
-        <Item class="ModuleScript" referent="12">
+        <Item class="ModuleScript" referent="16">
           <Properties>
             <string name="Name">AudioApplier</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -534,7 +1484,7 @@ return AudioApplier
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="13">
+        <Item class="ModuleScript" referent="17">
           <Properties>
             <string name="Name">GraphicsApplier</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -1159,6 +2109,8 @@ function GraphicsApplier.Init()
 	initialized = true
 
 	workspace.DescendantAdded:Connect(onDescendantAdded)
+	-- Um evento físico trocou o material do bloco (ex.: virou areia): reaplica a redução de texturas nele.
+	CollectionService:GetInstanceAddedSignal(Tags.EventSkinned):Connect(onDescendantAdded)
 	CollectionService:GetInstanceAddedSignal(CULL_TAG):Connect(addChunk)
 	CollectionService:GetInstanceRemovedSignal(CULL_TAG):Connect(removeChunk)
 	task.spawn(registerExistingChunks)
@@ -1233,7 +2185,7 @@ return GraphicsApplier
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="14">
+        <Item class="ModuleScript" referent="18">
           <Properties>
             <string name="Name">SettingsClient</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -1405,7 +2357,7 @@ return SettingsClient
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="15">
+        <Item class="ModuleScript" referent="19">
           <Properties>
             <string name="Name">SettingsSchema</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -1518,7 +2470,7 @@ return SettingsSchema
           </Properties>
         </Item>
       </Item>
-      <Item class="ModuleScript" referent="16">
+      <Item class="ModuleScript" referent="20">
         <Properties>
           <string name="Name">Tags</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -1537,15 +2489,16 @@ return {
 	Indestructible = "Indestructible", -- Nunca deve ser quebrado (tabuleiro, chão da ilha)
 	Water = "Water", -- Parts de água (oceano, água de enchente)
 	Weapon = "Weapon", -- Tool de arma
+	EventSkinned = "EventSkinned", -- BasePart que um evento físico já retexturizou (não muda de novo)
 }
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="17">
+      <Item class="Folder" referent="21">
         <Properties>
           <string name="Name">UI</string>
         </Properties>
-        <Item class="ModuleScript" referent="18">
+        <Item class="ModuleScript" referent="22">
           <Properties>
             <string name="Name">UIKit</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -2223,11 +3176,11 @@ return UIKit
           </Properties>
         </Item>
       </Item>
-      <Item class="Folder" referent="19">
+      <Item class="Folder" referent="23">
         <Properties>
           <string name="Name">Util</string>
         </Properties>
-        <Item class="ModuleScript" referent="20">
+        <Item class="ModuleScript" referent="24">
           <Properties>
             <string name="Name">PartBuilder</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -2346,7 +3299,7 @@ return PartBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="21">
+        <Item class="ModuleScript" referent="25">
           <Properties>
             <string name="Name">Signal</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -2416,15 +3369,15 @@ return Signal
       </Item>
     </Item>
   </Item>
-  <Item class="ServerScriptService" referent="22">
+  <Item class="ServerScriptService" referent="26">
     <Properties>
       <string name="Name">ServerScriptService</string>
     </Properties>
-    <Item class="Folder" referent="23">
+    <Item class="Folder" referent="27">
       <Properties>
         <string name="Name">Game</string>
       </Properties>
-      <Item class="ModuleScript" referent="24">
+      <Item class="ModuleScript" referent="28">
         <Properties>
           <string name="Name">BoardModel</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -2936,7 +3889,7 @@ return BoardModel
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="25">
+      <Item class="ModuleScript" referent="29">
         <Properties>
           <string name="Name">BoardService</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -3138,6 +4091,18 @@ local function cooldownRemaining(): number
 		return 0
 	end
 	return math.max(cooldownEndsAt - workspace:GetServerTimeNow(), 0)
+end
+
+-- Contorno branco visível através das paredes: todo mundo sempre sabe onde o tabuleiro está.
+local function addHighlight(model: Model)
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "Destaque"
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillTransparency = 1
+	highlight.OutlineColor = Color3.new(1, 1, 1)
+	highlight.OutlineTransparency = 0
+	highlight.Adornee = model
+	highlight.Parent = model
 end
 
 local function canRollNow(): boolean
@@ -3518,6 +4483,7 @@ local function performRoll(player: Player)
 	broadcastStatus()
 
 	BoardService.Rolled:Fire({
+		rollerUserId = player.UserId,
 		dice = values,
 		total = total,
 		fromSpace = fromSpace,
@@ -3638,6 +4604,7 @@ local function rebuild()
 	end
 	ensureFolders()
 	board = BoardModel.Build(boardFolder, GameConfig.BOARD_SPACES)
+	addHighlight(board.model)
 	createPrompts()
 	if lastRiddle then
 		BoardModel.SetRiddle(board, lastRiddle)
@@ -3746,6 +4713,7 @@ function BoardService.Init(info)
 
 	ensureFolders()
 	board = BoardModel.Build(boardFolder, GameConfig.BOARD_SPACES)
+	addHighlight(board.model)
 	createPrompts()
 	local spawnCFrame = resolveSpawn(info.boardSpawn)
 	lastSafeCFrame = spawnCFrame
@@ -3887,7 +4855,7 @@ return BoardService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="26">
+      <Item class="ModuleScript" referent="30">
         <Properties>
           <string name="Name">BoundaryService</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -3943,7 +4911,7 @@ return BoundaryService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="27">
+      <Item class="ModuleScript" referent="31">
         <Properties>
           <string name="Name">CombatUtil</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -3959,9 +4927,14 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Net = require(ReplicatedStorage.Shared.Net)
+local Signal = require(ReplicatedStorage.Shared.Util.Signal)
 local Tags = require(ReplicatedStorage.Shared.Tags)
 
 local CombatUtil = {}
+
+-- Disparado quando um jogador dá o golpe final num inimigo: (attacker: Player, enemy: Model).
+-- O MatchStats usa isto para contar os bichos abatidos de cada um.
+CombatUtil.EnemyKilled = Signal.new()
 
 -- Jogadores -----------------------------------------------------------------------
 
@@ -4081,13 +5054,19 @@ function CombatUtil.DamageEnemy(model: Model, amount: number, attacker: Player?)
 		model:SetAttribute("LastAttackerUserId", attacker.UserId)
 	end
 	local humanoid = CombatUtil.GetHumanoid(model)
+	local killed
 	if humanoid then
 		humanoid:TakeDamage(amount)
-		return humanoid.Health <= 0
+		killed = humanoid.Health <= 0
+	else
+		local health = math.max((tonumber(model:GetAttribute("Health")) or 0) - amount, 0)
+		model:SetAttribute("Health", health)
+		killed = health <= 0
 	end
-	local health = math.max((tonumber(model:GetAttribute("Health")) or 0) - amount, 0)
-	model:SetAttribute("Health", health)
-	return health <= 0
+	if killed and attacker then
+		CombatUtil.EnemyKilled:Fire(attacker, model)
+	end
+	return killed
 end
 
 -- Dano em área ----------------------------------------------------------------------
@@ -4156,7 +5135,7 @@ return CombatUtil
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="28">
+      <Item class="ModuleScript" referent="32">
         <Properties>
           <string name="Name">DestructionService</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -4958,11 +5937,11 @@ return DestructionService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="29">
+      <Item class="Folder" referent="33">
         <Properties>
           <string name="Name">EventHelpers</string>
         </Properties>
-        <Item class="ModuleScript" referent="30">
+        <Item class="ModuleScript" referent="34">
           <Properties>
             <string name="Name">GroundUtil</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -5062,7 +6041,7 @@ return GroundUtil
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="31">
+        <Item class="ModuleScript" referent="35">
           <Properties>
             <string name="Name">NpcEventUtil</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -5343,7 +6322,7 @@ return NpcEventUtil
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="32">
+        <Item class="ModuleScript" referent="36">
           <Properties>
             <string name="Name">PhysCreatures</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -5604,7 +6583,7 @@ return PhysCreatures
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="33">
+        <Item class="ModuleScript" referent="37">
           <Properties>
             <string name="Name">PhysUtil</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -6309,16 +7288,227 @@ return PhysUtil
 ]]></string>
           </Properties>
         </Item>
+        <Item class="ModuleScript" referent="38">
+          <Properties>
+            <string name="Name">SurfaceSkin</string>
+            <string name="Source"><![CDATA[--!nonstrict
+-- Retextura o mapa em volta de um foco de evento físico (ex.: blocos viram areia em volta da Areia Movediça).
+--
+--   SurfaceSkin.Apply(skin, center, radius, random?, eventId?)   -- não cede
+--     skin = { Material: Enum.Material, Colors: { Color3 } }   (campo Skin da definição do evento)
+--
+-- Regras:
+--   * só mexe no que está em workspace.Map (ignora água, vidro, neon, partes invisíveis e as regiões);
+--   * um bloco retexturizado ganha a tag EventSkinned e NUNCA muda de novo (o primeiro evento "ganha");
+--   * blocos enormes (chão da ilha, pisos grandes) não mudam inteiros: ganham placas finas por cima numa
+--     grade fixa; cada célula da grade recebe no máximo uma placa (a do primeiro evento).
+-- A troca é permanente (não volta no fim do evento): o mapa vai mudando conforme a partida avança.
+
+local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Tags = require(ReplicatedStorage.Shared.Tags)
+
+local SurfaceSkin = {}
+
+local MAX_PART_SIZE = 40 -- acima disto (maior dimensão) a part recebe placas em vez de mudar inteira
+local MAX_PARTS_PER_APPLY = 160
+local CELL = 8 -- lado das placas (studs)
+local TILE_THICKNESS = 0.12
+local MAX_TILES_PER_APPLY = 70
+local RAY_START_ABOVE = 7
+local RAY_LENGTH = 30
+
+local SKIP_MATERIALS = {
+	[Enum.Material.Glass] = true,
+	[Enum.Material.Neon] = true,
+	[Enum.Material.ForceField] = true,
+	[Enum.Material.Water] = true,
+}
+local SKIP_TAGS = {
+	Tags.Water,
+	Tags.EventSkinned,
+	Tags.Weapon,
+	Tags.WeaponSpawn,
+	Tags.PlayerSpawn,
+	Tags.BoardSpawn,
+}
+
+local usedCells: { [string]: boolean } = {}
+local tileFolder: Folder? = nil
+
+local function mapFolder(): Instance?
+	return workspace:FindFirstChild("Map")
+end
+
+local function getTileFolder(map: Instance): Folder
+	if tileFolder and tileFolder.Parent then
+		return tileFolder
+	end
+	local folder = map:FindFirstChild("PlacasDeEvento")
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = "PlacasDeEvento"
+		folder.Parent = map
+	end
+	tileFolder = folder :: Folder
+	return tileFolder :: Folder
+end
+
+local function maxSize(part: BasePart): number
+	local size = part.Size
+	return math.max(size.X, size.Y, size.Z)
+end
+
+local function canSkin(part: BasePart, regions: Instance?): boolean
+	if part.Transparency >= 0.7 or SKIP_MATERIALS[part.Material] then
+		return false
+	end
+	if regions and part:IsDescendantOf(regions) then
+		return false
+	end
+	for _, tag in SKIP_TAGS do
+		if CollectionService:HasTag(part, tag) then
+			return false
+		end
+	end
+	return true
+end
+
+local function pickColor(skin, rng: Random): Color3
+	local colors = skin.Colors
+	local base = if type(colors) == "table" and #colors > 0
+		then colors[rng:NextInteger(1, #colors)]
+		else Color3.fromRGB(150, 130, 100)
+	local h, s, v = base:ToHSV()
+	return Color3.fromHSV(h, s, math.clamp(v + rng:NextNumber(-0.04, 0.04), 0, 1))
+end
+
+local function mark(part: BasePart, eventId: string?)
+	CollectionService:AddTag(part, Tags.EventSkinned)
+	if eventId then
+		part:SetAttribute("EventSkin", eventId)
+	end
+end
+
+local function skinParts(skin, center: Vector3, radius: number, rng: Random, map: Instance, eventId: string?)
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { map }
+	params.MaxParts = MAX_PARTS_PER_APPLY * 2
+	local regions = map:FindFirstChild("Regions")
+	local changed = 0
+	for _, part in workspace:GetPartBoundsInRadius(center, radius, params) do
+		if changed >= MAX_PARTS_PER_APPLY then
+			break
+		end
+		if part:IsA("BasePart") and maxSize(part) <= MAX_PART_SIZE and canSkin(part, regions) then
+			part.Material = skin.Material
+			part.Color = pickColor(skin, rng)
+			mark(part, eventId)
+			changed += 1
+		end
+	end
+end
+
+local function cellKey(position: Vector3): string
+	return ("%d,%d,%d"):format(math.floor(position.X / CELL), math.floor(position.Y / 2), math.floor(position.Z / CELL))
+end
+
+local function skinTiles(skin, center: Vector3, radius: number, rng: Random, map: Instance, eventId: string?)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { map }
+	params.IgnoreWater = true
+	local regions = map:FindFirstChild("Regions")
+	local folder = getTileFolder(map)
+	local placed = 0
+	local cells = math.ceil(radius / CELL)
+	local baseX = math.floor(center.X / CELL)
+	local baseZ = math.floor(center.Z / CELL)
+	for dx = -cells, cells do
+		for dz = -cells, cells do
+			if placed >= MAX_TILES_PER_APPLY then
+				return
+			end
+			local x = (baseX + dx + 0.5) * CELL
+			local z = (baseZ + dz + 0.5) * CELL
+			local flat = Vector3.new(x - center.X, 0, z - center.Z).Magnitude
+			-- borda irregular: as células da beirada entram com menos chance
+			if flat <= radius and (flat < radius * 0.7 or rng:NextNumber() < 0.55) then
+				local origin = Vector3.new(x, center.Y + RAY_START_ABOVE, z)
+				local hit = workspace:Raycast(origin, Vector3.new(0, -RAY_LENGTH, 0), params)
+				local part = hit and hit.Instance
+				if
+					hit
+					and part
+					and part:IsA("BasePart")
+					and part.Parent ~= folder
+					and hit.Normal.Y > 0.7
+					and maxSize(part) > MAX_PART_SIZE
+					and canSkin(part, regions)
+				then
+					local key = cellKey(hit.Position)
+					if not usedCells[key] then
+						usedCells[key] = true
+						local tile = Instance.new("Part")
+						tile.Name = "Placa"
+						tile.Anchored = true
+						tile.CanCollide = false
+						tile.CanTouch = false
+						tile.CastShadow = false
+						tile.Size = Vector3.new(CELL, TILE_THICKNESS, CELL)
+						tile.CFrame = CFrame.new(x, hit.Position.Y + TILE_THICKNESS / 2 + 0.02, z)
+						tile.Material = skin.Material
+						tile.Color = pickColor(skin, rng)
+						tile.TopSurface = Enum.SurfaceType.Smooth
+						tile.BottomSurface = Enum.SurfaceType.Smooth
+						tile.CanQuery = false
+						mark(tile, eventId)
+						tile.Parent = folder
+						placed += 1
+					end
+				end
+			end
+		end
+	end
+end
+
+function SurfaceSkin.Apply(skin, center: Vector3, radius: number, random: Random?, eventId: string?)
+	if type(skin) ~= "table" or typeof(skin.Material) ~= "EnumItem" or typeof(center) ~= "Vector3" then
+		return
+	end
+	local map = mapFolder()
+	if not map or not (radius > 0) then
+		return
+	end
+	local rng = random or Random.new()
+	local ok, err = pcall(skinParts, skin, center, radius, rng, map, eventId)
+	if not ok then
+		warn("[SurfaceSkin] Erro ao retexturizar blocos: " .. tostring(err))
+	end
+	ok, err = pcall(skinTiles, skin, center, radius, rng, map, eventId)
+	if not ok then
+		warn("[SurfaceSkin] Erro ao criar placas: " .. tostring(err))
+	end
+end
+
+return SurfaceSkin
+]]></string>
+          </Properties>
+        </Item>
       </Item>
-      <Item class="ModuleScript" referent="34">
+      <Item class="ModuleScript" referent="39">
         <Properties>
           <string name="Name">EventService</string>
           <string name="Source"><![CDATA[--!nonstrict
 -- Eventos do tabuleiro (servidor):
 --   * carrega todo ModuleScript filho direto de Game/Events que tenha Id e Start;
 --   * sorteia no Init o plano "casa -> evento" (pesos, MinSpace, sem repetir o mesmo evento em sequência);
---   * inicia instâncias (pasta workspace.ActiveEvents/<instanceId>, EventContext do contrato),
---     agenda o fim, chama o cleanup e avisa os clientes (Event_Started / Event_Ended / Notify).
+--   * inicia eventos que duram até o fim da partida: cada evento roda em focos (pasta
+--     workspace.ActiveEvents/<id do foco>, EventContext do contrato) que terminam, chamam o cleanup e
+--     recomeçam em outro ponto do mapa; avisa os clientes (Event_Started / Event_Ended / Notify);
+--   * eventos físicos trocam a textura dos blocos em volta de cada foco (EventHelpers/SurfaceSkin).
 -- Um evento com erro nunca derruba o serviço: tudo que vem dos módulos de evento roda em pcall.
 
 local Players = game:GetService("Players")
@@ -6330,11 +7520,13 @@ local Net = require(ReplicatedStorage.Shared.Net)
 local BoardService = require(script.Parent.BoardService)
 local CombatUtil = require(script.Parent.CombatUtil)
 local GroundUtil = require(script.Parent.EventHelpers.GroundUtil)
+local SurfaceSkin = require(script.Parent.EventHelpers.SurfaceSkin)
 
 local EventService = {}
 
 local FALLBACK_RIDDLE = "Um tambor distante começa a soar;\na selva acordou e vem te visitar."
 local CLEANUP_TIMEOUT = 30 -- a pasta do evento é destruída mesmo que o cleanup trave
+local MAX_START_FAILURES = 3
 
 local initialized = false
 local mapInfo = nil
@@ -6345,7 +7537,7 @@ local definitions: { [string]: any } = {}
 local order: { string } = {} -- ids em ordem alfabética (sorteio determinístico dado o Random)
 local plan: { [number]: string } = {}
 local lastPlannedId: string? = nil
-local active: { any } = {} -- registros em ordem de início (o primeiro é o mais antigo)
+local active: { any } = {} -- eventos em ordem de início; cada um tem seus focos (runs)
 local counter = 0
 local random = Random.new()
 
@@ -6390,6 +7582,26 @@ local function normalize(definition: any, moduleName: string)
 	result.MinSpace = math.floor(positiveNumber(definition.MinSpace, 1, 1, GameConfig.BOARD_SPACES))
 	result.Duration = positiveNumber(definition.Duration, 60, 5, 900)
 	result.Radius = positiveNumber(definition.Radius, GameConfig.EVENT_DEFAULT_RADIUS, 4, 1000)
+	-- Focos ao mesmo tempo: físicos se espalham (vários focos); NPC e os que não se espalham têm um só.
+	local spreads = result.Kind == "physical" and definition.Spread ~= false
+	result.Spread = spreads
+	result.Sites =
+		math.floor(positiveNumber(definition.Sites, if spreads then GameConfig.PHYSICAL_EVENT_SITES else 1, 1, 8))
+	-- Pausa (s) entre um foco terminar e o próximo começar.
+	local delayRange = definition.RestartDelay
+	if type(delayRange) == "table" and type(delayRange[1]) == "number" and type(delayRange[2]) == "number" then
+		result.RestartDelay = { math.max(delayRange[1], 0), math.max(delayRange[2], delayRange[1], 0) }
+	elseif result.Kind == "npc" then
+		result.RestartDelay = { 25, 45 }
+	else
+		result.RestartDelay = { 3, 8 }
+	end
+	if
+		definition.Skin ~= nil and (type(definition.Skin) ~= "table" or typeof(definition.Skin.Material) ~= "EnumItem")
+	then
+		warn(("[EventService] Skin inválido no evento '%s' (ignorado)."):format(definition.Id))
+		result.Skin = nil
+	end
 	local riddles = {}
 	if type(definition.Riddles) == "table" then
 		for _, riddle in definition.Riddles do
@@ -6514,48 +7726,64 @@ local function buildPlan()
 	end
 end
 
--- Ciclo de vida das instâncias -----------------------------------------------------------
+-- Ciclo de vida -------------------------------------------------------------------------------
+-- Um evento (o que aparece no HUD) dura até o fim da partida. Ele acontece em "focos": cada foco roda o
+-- Start do módulo, termina sozinho (Duration ou ctx.finish, ex.: todos os bichos mortos) e, depois de uma
+-- pausa, recomeça em outro lugar. Eventos físicos têm vários focos espalhados pelo mapa; eventos de NPC
+-- mandam novas ondas perto dos jogadores; o pelicano volta sempre para o tabuleiro.
 
-local function removeFromActive(record)
-	local index = table.find(active, record)
+local function countRuns(): number
+	local count = 0
+	for _, event in active do
+		count += #event.runs
+	end
+	return count
+end
+
+local function removeRun(event, run)
+	local index = table.find(event.runs, run)
 	if index then
-		table.remove(active, index)
+		table.remove(event.runs, index)
 	end
 end
 
-local function stopRecord(record, natural: boolean?)
-	if record.stopped then
+local scheduleNext: (event: any, slot: number) -> ()
+
+local function stopRun(run, natural: boolean?)
+	if run.stopped then
 		return
 	end
-	if record.starting then
+	if run.starting then
 		-- Start ainda está rodando: termina assim que ele devolver o cleanup.
-		record.active = false
-		record.pendingStop = true
+		run.active = false
+		run.pendingStop = true
+		run.pendingNatural = natural
 		return
 	end
-	record.stopped = true
-	record.active = false
-	if record.timer and coroutine.running() ~= record.timer then
-		pcall(task.cancel, record.timer)
+	run.stopped = true
+	run.active = false
+	if run.timer and coroutine.running() ~= run.timer then
+		pcall(task.cancel, run.timer)
 	end
-	removeFromActive(record)
+	local event = run.event
+	removeRun(event, run)
 
 	-- O cleanup pode ceder (ex.: fade de NPCs): roda em outra thread e só então destrói a pasta.
-	local folder = record.folder
-	local cleanup = record.cleanup
-	-- Rede de segurança: os NPCs do evento usam groupId = instanceId. Se o Start falhou (sem cleanup)
-	-- ou o cleanup quebrou/travou, eles sumiriam nunca.
+	local folder = run.folder
+	local cleanup = run.cleanup
+	-- Rede de segurança: os NPCs do foco usam groupId = id do foco. Se o Start falhou (sem cleanup)
+	-- ou o cleanup quebrou/travou, eles não sumiriam nunca.
 	local function despawnGroup()
 		local npc = services.NPC
 		if npc and type(npc.DespawnGroup) == "function" then
-			pcall(npc.DespawnGroup, record.instanceId)
+			pcall(npc.DespawnGroup, run.instanceId)
 		end
 	end
 	task.spawn(function()
 		if cleanup then
 			local ok, err = pcall(cleanup)
 			if not ok then
-				warn(("[EventService] Erro no cleanup de '%s': %s"):format(record.instanceId, tostring(err)))
+				warn(("[EventService] Erro no cleanup de '%s': %s"):format(run.instanceId, tostring(err)))
 			end
 		end
 		despawnGroup()
@@ -6570,9 +7798,8 @@ local function stopRecord(record, natural: boolean?)
 		end
 	end)
 
-	remotes.ended:FireAllClients(record.instanceId)
-	if natural then
-		remotes.notify:FireAllClients(("%s acabou."):format(record.definition.DisplayName), "info")
+	if natural and not event.stopped then
+		scheduleNext(event, run.slot)
 	end
 end
 
@@ -6588,16 +7815,194 @@ local function regionNameAt(position: Vector3): string?
 	return nil
 end
 
+-- Ponto no chão em algum lugar da ilha: dentro de uma região nomeada (cômodos, labirinto, estufa...) ou
+-- em qualquer parte do platô.
+local function randomMapPoint(rng: Random): Vector3
+	local regions = mapInfo and mapInfo.regions
+	if type(regions) == "table" and #regions > 0 and rng:NextNumber() < 0.7 then
+		for _ = 1, 4 do
+			local region = regions[rng:NextInteger(1, #regions)]
+			if type(region) == "table" and typeof(region.cframe) == "CFrame" and typeof(region.size) == "Vector3" then
+				local size = region.size
+				local top = region.cframe
+					* Vector3.new(
+						rng:NextNumber(-0.4, 0.4) * size.X,
+						size.Y / 2 - 0.5,
+						rng:NextNumber(-0.4, 0.4) * size.Z
+					)
+				local ground = GroundUtil.FindGround(top, size.Y + 10, 0)
+				if ground then
+					return ground
+				end
+			end
+		end
+	end
+	local center = mapInfo and mapInfo.islandCenter or GameConfig.ISLAND_CENTER
+	local radius = (mapInfo and mapInfo.islandRadius or GameConfig.ISLAND_RADIUS) * 0.82
+	local groundY = mapInfo and mapInfo.groundY or GameConfig.GROUND_Y
+	local waterY = mapInfo and mapInfo.waterLevelY or GameConfig.WATER_LEVEL_Y
+	for _ = 1, 10 do
+		local angle = rng:NextNumber(0, math.pi * 2)
+		local distance = math.sqrt(rng:NextNumber()) * radius
+		local probe =
+			Vector3.new(center.X + math.cos(angle) * distance, groundY + 80, center.Z + math.sin(angle) * distance)
+		local ground = GroundUtil.FindGround(probe, 140, 0)
+		if ground and ground.Y > waterY + 1 then
+			return ground
+		end
+	end
+	return BoardService.GetBoardPosition()
+end
+
+-- Perto de um jogador vivo qualquer (ou do tabuleiro, se ninguém estiver vivo).
+local function nearRandomPlayer(rng: Random, minDistance: number, maxDistance: number): Vector3
+	local alive = CombatUtil.GetAlivePlayers()
+	if #alive > 0 then
+		local player = alive[rng:NextInteger(1, #alive)]
+		local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+		if root and root:IsA("BasePart") then
+			return GroundUtil.RandomPointNear(root.Position, minDistance, maxDistance, rng)
+		end
+	end
+	return BoardService.GetBoardPosition()
+end
+
+local function nextPosition(event, rng: Random): Vector3
+	local definition = event.definition
+	if definition.Spread == false then
+		return BoardService.GetBoardPosition()
+	end
+	if definition.Kind == "npc" then
+		return nearRandomPlayer(rng, 20, 60)
+	end
+	if rng:NextNumber() < 0.45 then
+		return nearRandomPlayer(rng, 25, 110)
+	end
+	return randomMapPoint(rng)
+end
+
+local function startRun(event, slot: number, position: Vector3)
+	if event.stopped then
+		return
+	end
+	local definition = event.definition
+	counter += 1
+	local instanceId = ("%s_%d"):format(definition.Id, counter)
+	local folder = Instance.new("Folder")
+	folder.Name = instanceId
+	folder.Parent = activeFolder
+
+	local run = {
+		event = event,
+		slot = slot,
+		instanceId = instanceId,
+		folder = folder,
+		active = true,
+		stopped = false,
+		starting = true,
+		pendingStop = false,
+		pendingNatural = false,
+		cleanup = nil,
+		timer = nil,
+	}
+	table.insert(event.runs, run)
+
+	local rng = Random.new()
+	local context = {
+		instanceId = instanceId,
+		eventId = definition.Id,
+		position = position,
+		radius = definition.Radius,
+		duration = definition.Duration,
+		mapInfo = mapInfo,
+		folder = folder,
+		random = rng,
+		isActive = function(): boolean
+			return run.active
+		end,
+		finish = function()
+			if run.stopped or run.pendingStop then
+				return
+			end
+			run.active = false
+			if run.starting then
+				run.pendingStop = true
+				run.pendingNatural = true
+			else
+				task.defer(stopRun, run, true)
+			end
+		end,
+		services = services,
+	}
+
+	-- Blocos em volta do foco mudam de textura conforme o evento (permanente).
+	if definition.Skin then
+		task.spawn(
+			SurfaceSkin.Apply,
+			definition.Skin,
+			position,
+			math.min(definition.Radius * 0.75, 34),
+			rng,
+			definition.Id
+		)
+	end
+
+	local ok, result = pcall(definition.Start, context)
+	run.starting = false
+	if not ok then
+		warn(("[EventService] Erro ao iniciar '%s': %s"):format(definition.Id, tostring(result)))
+		event.failures += 1
+		run.pendingStop = true
+		-- Um módulo que quebra sempre não fica tentando para sempre (3 falhas seguidas = para este foco).
+		run.pendingNatural = event.failures < MAX_START_FAILURES
+	else
+		event.failures = 0
+		if type(result) == "function" then
+			run.cleanup = result
+		end
+	end
+
+	if run.pendingStop then
+		stopRun(run, run.pendingNatural)
+	elseif definition.Kind ~= "npc" then
+		-- Focos físicos terminam no tempo deles e recomeçam em outro lugar. Os de NPC terminam quando a
+		-- onda inteira morre (ctx.finish).
+		run.timer = task.delay(definition.Duration, stopRun, run, true)
+	end
+end
+
+function scheduleNext(event, slot: number)
+	local definition = event.definition
+	local delayRange = definition.RestartDelay
+	task.spawn(function()
+		task.wait(random:NextNumber(delayRange[1], delayRange[2]))
+		-- Limite global de focos (desempenho): espera vaga.
+		while not event.stopped and countRuns() >= GameConfig.MAX_EVENT_SITES do
+			task.wait(5)
+		end
+		if event.stopped then
+			return
+		end
+		local ok, err = pcall(function()
+			startRun(event, slot, nextPosition(event, Random.new()))
+		end)
+		if not ok then
+			warn(("[EventService] Erro ao reiniciar '%s': %s"):format(definition.Id, tostring(err)))
+			if not event.stopped then
+				scheduleNext(event, slot)
+			end
+		end
+	end)
+end
+
 local function watchReady(player: Player)
 	local function sendActive()
 		if not player.Parent or not player:GetAttribute("ClientReady") then
 			return
 		end
-		-- Quem chega no meio recebe os eventos em andamento com a duração que ainda falta.
-		for _, record in active do
-			local info = table.clone(record.info)
-			info.duration = math.max(record.definition.Duration - (os.clock() - record.startedAt), 0)
-			remotes.started:FireClient(player, info)
+		-- Quem chega no meio recebe os eventos em andamento.
+		for _, event in active do
+			remotes.started:FireClient(player, table.clone(event.info))
 		end
 	end
 	player:GetAttributeChangedSignal("ClientReady"):Connect(sendActive)
@@ -6687,7 +8092,8 @@ function EventService.GetRiddle(eventId: string): string
 	return definition.Riddles[random:NextInteger(1, #definition.Riddles)]
 end
 
--- Inicia o evento em `position` e devolve o id da instância ("" se o evento não existe).
+-- Inicia o evento em `position` (o primeiro foco) e devolve o id do evento ("" se ele não existe).
+-- O evento continua até EventService.StopAll (fim da partida).
 function EventService.Start(eventId: string, position: Vector3): string
 	local definition = definitions[eventId]
 	if not initialized or not definition then
@@ -6698,109 +8104,73 @@ function EventService.Start(eventId: string, position: Vector3): string
 		position = BoardService.GetBoardPosition()
 	end
 
-	-- Limite de eventos simultâneos: o mais antigo termina.
-	local maxActive = math.max(math.floor(GameConfig.MAX_ACTIVE_EVENTS), 1)
-	while #active >= maxActive do
-		stopRecord(active[1], false)
-		-- Segurança: se o registro não saiu da lista (ainda iniciando), remove à força.
-		if active[1] and active[1].pendingStop then
-			table.remove(active, 1)
-		end
-	end
-
 	counter += 1
-	local instanceId = ("%s_%d"):format(definition.Id, counter)
-	local folder = Instance.new("Folder")
-	folder.Name = instanceId
-	folder.Parent = activeFolder
-
+	local instanceId = ("%s_evento_%d"):format(definition.Id, counter)
 	local regionName = regionNameAt(position)
-	local record = {
+	local event = {
 		instanceId = instanceId,
 		eventId = definition.Id,
 		definition = definition,
-		folder = folder,
-		active = true,
 		stopped = false,
-		starting = true,
-		pendingStop = false,
-		startedAt = os.clock(),
-		cleanup = nil,
-		timer = nil,
+		failures = 0,
+		runs = {},
 		info = {
 			id = instanceId,
 			eventId = definition.Id,
 			name = definition.DisplayName,
 			position = position,
 			radius = definition.Radius,
-			duration = definition.Duration,
+			duration = -1, -- até o fim da partida
 			regionName = regionName,
 		},
 	}
-	table.insert(active, record)
+	table.insert(active, event)
 
-	local context = {
-		instanceId = instanceId,
-		eventId = definition.Id,
-		position = position,
-		radius = definition.Radius,
-		duration = definition.Duration,
-		mapInfo = mapInfo,
-		folder = folder,
-		random = Random.new(),
-		isActive = function(): boolean
-			return record.active
-		end,
-		finish = function()
-			if record.stopped or record.pendingStop then
-				return
-			end
-			record.active = false
-			if record.starting then
-				record.pendingStop = true
-			else
-				task.defer(stopRecord, record, true)
-			end
-		end,
-		services = services,
-	}
-
-	remotes.started:FireAllClients(record.info)
+	remotes.started:FireAllClients(event.info)
+	local where = if definition.Kind == "physical" and definition.Spread ~= false
+		then "espalhando-se pelo mapa"
+		else regionName or "perto do tabuleiro"
 	remotes.notify:FireAllClients(
-		("Evento: %s — %s"):format(definition.DisplayName, regionName or "perto do tabuleiro"),
+		("Evento: %s — %s (até o fim da partida)"):format(definition.DisplayName, where),
 		"warning"
 	)
 
-	local ok, result = pcall(definition.Start, context)
-	record.starting = false
-	if not ok then
-		warn(("[EventService] Erro ao iniciar '%s': %s"):format(definition.Id, tostring(result)))
-		record.pendingStop = true
-	elseif type(result) == "function" then
-		record.cleanup = result
-	end
-
-	if record.pendingStop then
-		stopRecord(record, ok)
-	else
-		record.timer = task.delay(definition.Duration, stopRecord, record, true)
+	-- Primeiro foco onde o dado foi jogado; os outros (eventos físicos) já em pontos espalhados.
+	startRun(event, 1, position)
+	for slot = 2, definition.Sites do
+		task.delay(random:NextNumber(1.5, 6), function()
+			if not event.stopped and countRuns() < GameConfig.MAX_EVENT_SITES then
+				local ok, err = pcall(startRun, event, slot, nextPosition(event, Random.new()))
+				if not ok then
+					warn(("[EventService] Erro ao abrir um foco de '%s': %s"):format(definition.Id, tostring(err)))
+				end
+			elseif not event.stopped then
+				scheduleNext(event, slot)
+			end
+		end)
 	end
 	return instanceId
 end
 
--- Encerra todos os eventos ativos (vitória / derrota).
+-- Encerra todos os eventos (vitória / derrota).
 function EventService.StopAll()
-	for _, record in table.clone(active) do
-		stopRecord(record, false)
+	for _, event in table.clone(active) do
+		event.stopped = true
+		for _, run in table.clone(event.runs) do
+			stopRun(run, false)
+			-- Segurança: se o foco ainda estava iniciando, sai da lista à força.
+			removeRun(event, run)
+		end
+		remotes.ended:FireAllClients(event.instanceId)
 	end
 	table.clear(active)
 end
 
--- Lista dos eventos ativos (payloads EventInfoPayload).
+-- Lista dos eventos ativos (payloads EventInfoPayload; duration = -1 = até o fim da partida).
 function EventService.GetActive()
 	local list = {}
-	for _, record in active do
-		table.insert(list, table.clone(record.info))
+	for _, event in active do
+		table.insert(list, table.clone(event.info))
 	end
 	return list
 end
@@ -6809,11 +8179,11 @@ return EventService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="35">
+      <Item class="Folder" referent="40">
         <Properties>
           <string name="Name">Events</string>
         </Properties>
-        <Item class="ModuleScript" referent="36">
+        <Item class="ModuleScript" referent="41">
           <Properties>
             <string name="Name">Earthquake</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -6873,6 +8243,12 @@ return {
 	MinSpace = 14,
 	Duration = 30,
 	Radius = 80,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram pedra rachada (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Basalt,
+		Colors = { Color3.fromRGB(72, 68, 66), Color3.fromRGB(60, 56, 54), Color3.fromRGB(86, 80, 76) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()
@@ -7228,7 +8604,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="37">
+        <Item class="ModuleScript" referent="42">
           <Properties>
             <string name="Name">Hunter</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -7284,7 +8660,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="38">
+        <Item class="ModuleScript" referent="43">
           <Properties>
             <string name="Name">Lion</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -7339,7 +8715,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="39">
+        <Item class="ModuleScript" referent="44">
           <Properties>
             <string name="Name">Monkeys</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -7478,7 +8854,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="40">
+        <Item class="ModuleScript" referent="45">
           <Properties>
             <string name="Name">Monsoon</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -7560,6 +8936,12 @@ return {
 	MinSpace = 6,
 	Duration = 75,
 	Radius = 55,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram lama (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Mud,
+		Colors = { Color3.fromRGB(94, 74, 52), Color3.fromRGB(80, 63, 45), Color3.fromRGB(106, 84, 60) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()
@@ -7813,7 +9195,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="41">
+        <Item class="ModuleScript" referent="46">
           <Properties>
             <string name="Name">Mosquitos</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -7861,7 +9243,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="42">
+        <Item class="ModuleScript" referent="47">
           <Properties>
             <string name="Name">Pelican</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -7927,6 +9309,8 @@ return {
 	MinSpace = 2,
 	Duration = 60,
 	Radius = 30,
+	Spread = false, -- sempre volta para onde o tabuleiro está
+	RestartDelay = { 35, 60 }, -- depois de devolver o tabuleiro, volta a atacar
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()
@@ -8311,7 +9695,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="43">
+        <Item class="ModuleScript" referent="48">
           <Properties>
             <string name="Name">Quicksand</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -8365,6 +9749,12 @@ return {
 	MinSpace = 2,
 	Duration = 60,
 	Radius = 40,
+	Sites = 3, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram areia (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Sand,
+		Colors = { Color3.fromRGB(196, 162, 106), Color3.fromRGB(181, 146, 94), Color3.fromRGB(208, 178, 122) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()
@@ -8648,7 +10038,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="44">
+        <Item class="ModuleScript" referent="49">
           <Properties>
             <string name="Name">Spiders</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -8783,7 +10173,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="45">
+        <Item class="ModuleScript" referent="50">
           <Properties>
             <string name="Name">Stampede</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -8865,6 +10255,12 @@ return {
 	MinSpace = 8,
 	Duration = 45,
 	Radius = 70,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram chão pisoteado (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Pebble,
+		Colors = { Color3.fromRGB(152, 134, 106), Color3.fromRGB(138, 120, 94), Color3.fromRGB(166, 148, 118) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()
@@ -9097,7 +10493,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="46">
+        <Item class="ModuleScript" referent="51">
           <Properties>
             <string name="Name">Tornado</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -9168,6 +10564,12 @@ return {
 	MinSpace = 10,
 	Duration = 48,
 	Radius = 70,
+	Sites = 2, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram terra revirada (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Ground,
+		Colors = { Color3.fromRGB(122, 98, 72), Color3.fromRGB(106, 86, 64), Color3.fromRGB(134, 110, 82) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()
@@ -9506,7 +10908,7 @@ return {
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="47">
+        <Item class="ModuleScript" referent="52">
           <Properties>
             <string name="Name">Vines</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -9562,6 +10964,12 @@ return {
 	MinSpace = 3,
 	Duration = 90,
 	Radius = 45,
+	Sites = 3, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram mato e folhas (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.LeafyGrass,
+		Colors = { Color3.fromRGB(66, 114, 48), Color3.fromRGB(54, 98, 42), Color3.fromRGB(80, 130, 56) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()
@@ -9886,7 +11294,7 @@ return {
           </Properties>
         </Item>
       </Item>
-      <Item class="Script" referent="48">
+      <Item class="Script" referent="53">
         <Properties>
           <string name="Name">GameMain</string>
           <token name="RunContext">0</token>
@@ -9984,6 +11392,19 @@ do
 	end
 end
 
+-- Personagens R6: o MatchService cria cada um; o Init só liga o estado de movimento (escalada) replicado.
+do
+	local CharacterService, err = tryRequire(ServerScriptService, "ServerShared", "CharacterService")
+	if CharacterService and type(CharacterService.Init) == "function" then
+		local ok, initErr = pcall(CharacterService.Init)
+		if not ok then
+			warn("[GameMain] Erro ao iniciar o CharacterService: " .. tostring(initErr))
+		end
+	else
+		warn("[GameMain] CharacterService indisponível: " .. tostring(err))
+	end
+end
+
 -- 4. Remotes usados pelo fluxo da partida (existem antes de qualquer cliente pedir).
 for _, name in
 	{
@@ -9998,6 +11419,7 @@ for _, name in
 		Net.Names.Player_Eliminated,
 		Net.Names.Fx_Play,
 		Net.Names.Notify,
+		Net.Names.Game_EndCutscene,
 	}
 do
 	Net.event(name)
@@ -10218,11 +11640,11 @@ print(("[GameMain] %s: servidor da partida pronto."):format(GameConfig.GAME_TITL
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="49">
+      <Item class="Folder" referent="54">
         <Properties>
           <string name="Name">Map</string>
         </Properties>
-        <Item class="ModuleScript" referent="50">
+        <Item class="ModuleScript" referent="55">
           <Properties>
             <string name="Name">Furniture</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -11380,7 +12802,7 @@ return Furniture
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="51">
+        <Item class="ModuleScript" referent="56">
           <Properties>
             <string name="Name">Garden</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -11811,7 +13233,7 @@ return Garden
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="52">
+        <Item class="ModuleScript" referent="57">
           <Properties>
             <string name="Name">Greenhouse</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -12206,7 +13628,7 @@ return Greenhouse
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="53">
+        <Item class="ModuleScript" referent="58">
           <Properties>
             <string name="Name">Island</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -12480,7 +13902,7 @@ return Island
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="54">
+        <Item class="ModuleScript" referent="59">
           <Properties>
             <string name="Name">Kit</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -12849,7 +14271,7 @@ return Kit
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="55">
+        <Item class="ModuleScript" referent="60">
           <Properties>
             <string name="Name">Mansion</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -14073,7 +15495,7 @@ return Mansion
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="56">
+        <Item class="ModuleScript" referent="61">
           <Properties>
             <string name="Name">MapBuilder</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -14329,7 +15751,7 @@ return MapBuilder
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="57">
+        <Item class="ModuleScript" referent="62">
           <Properties>
             <string name="Name">Maze</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -14821,7 +16243,7 @@ return Maze
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="58">
+        <Item class="ModuleScript" referent="63">
           <Properties>
             <string name="Name">Palette</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -14939,7 +16361,7 @@ return Palette
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="59">
+        <Item class="ModuleScript" referent="64">
           <Properties>
             <string name="Name">Plants</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -15158,7 +16580,7 @@ return Plants
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="60">
+        <Item class="ModuleScript" referent="65">
           <Properties>
             <string name="Name">Rooms</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -16940,7 +18362,7 @@ return Rooms
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="61">
+        <Item class="ModuleScript" referent="66">
           <Properties>
             <string name="Name">StartRoom</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -17292,7 +18714,7 @@ return StartRoom
           </Properties>
         </Item>
       </Item>
-      <Item class="ModuleScript" referent="62">
+      <Item class="ModuleScript" referent="67">
         <Properties>
           <string name="Name">MatchService</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -17307,14 +18729,19 @@ return StartRoom
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local ServerScriptService = game:GetService("ServerScriptService")
 local TeleportService = game:GetService("TeleportService")
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
+local CharacterService = require(ServerScriptService.ServerShared.CharacterService)
+local GlobalStats = require(ServerScriptService.ServerShared.GlobalStats)
+
 local BoardService = require(script.Parent.BoardService)
 local EventService = require(script.Parent.EventService)
+local MatchStats = require(script.Parent.MatchStats)
 
 local MatchService = {}
 
@@ -17331,6 +18758,7 @@ local CORPSE_TIME = 6 -- segundos até o corpo do eliminado sumir
 local TELEPORT_ATTEMPTS = 3
 local TELEPORT_PLAYER_RETRIES = 2
 local MAX_EXPECTED = 16
+local MAX_RESULTS = 8 -- linhas na tela de resultados
 local SPAWN_ATTEMPTS = 3 -- tentativas de criar o personagem
 local LOADING_LIMIT = 120 -- participante que não termina de carregar em 2 min sai da conta de vivos
 local DEFAULT_REASON = "Não resistiu aos perigos da selva"
@@ -17569,56 +18997,32 @@ function spawnCharacter(player: Player)
 		return
 	end
 	spawning[player] = true
-	local ok, err = pcall(function()
-		player:LoadCharacterAsync()
-	end)
-	if not ok and player.Parent and not player.Character then
-		-- Motores antigos sem LoadCharacterAsync: usa o método clássico.
-		ok, err = pcall(function()
-			(player :: any):LoadCharacter()
-		end)
-	end
+	-- Personagem R6 com a aparência do jogador (ServerShared/CharacterService). Os spawns do mapa já estão
+	-- na altura do HumanoidRootPart; só uma folga pequena.
+	local ok, result = pcall(CharacterService.Spawn, player, nextSpawnCFrame() + Vector3.new(0, 0.5, 0))
 	spawning[player] = nil
-	if not ok then
+	local character = if ok then result else nil
+	if not character or not player.Parent then
 		local attempts = (spawnAttempts[player] or 0) + 1
 		spawnAttempts[player] = attempts
 		warn(
 			("[MatchService] Falha ao criar o personagem de %s (tentativa %d): %s"):format(
 				player.Name,
 				attempts,
-				tostring(err)
+				tostring(result)
 			)
 		)
-		if attempts < SPAWN_ATTEMPTS then
-			task.delay(2, spawnCharacter, player)
-		end
-		return
-	end
-	local character = player.Character
-	if player.Parent and not character then
-		-- Garantia: se o carregamento devolveu antes de o personagem existir, espera um pouco por ele.
-		local deadline = os.clock() + 5
-		while player.Parent and not player.Character and os.clock() < deadline do
-			task.wait(0.1)
-		end
-		character = player.Character
-	end
-	if not player.Parent or not character then
-		local attempts = (spawnAttempts[player] or 0) + 1
-		spawnAttempts[player] = attempts
 		if player.Parent and attempts < SPAWN_ATTEMPTS then
 			task.delay(2, spawnCharacter, player)
 		end
 		return
 	end
-	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 5)
-	if not humanoid or not humanoid:IsA("Humanoid") then
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
 		warn(("[MatchService] Personagem de %s sem Humanoid."):format(player.Name))
 		return
 	end
 	record.spawned = true
-	-- Os spawns do mapa já estão na altura do HumanoidRootPart; só uma folga pequena.
-	character:PivotTo(nextSpawnCFrame() + Vector3.new(0, 0.5, 0))
 	humanoid.MaxHealth = GameConfig.PLAYER_MAX_HEALTH
 	humanoid.Health = GameConfig.PLAYER_MAX_HEALTH
 	player:SetAttribute("LastDamageSource", nil)
@@ -17779,6 +19183,33 @@ local function endMatch(victory: boolean)
 			warn("[MatchService] Erro ao remover os NPCs: " .. tostring(err))
 		end
 	end
+	-- Resultados: cutscene com o melhor da partida (todos os clientes) e placar global (DataStore).
+	local okResults, results = pcall(MatchStats.Results)
+	if not okResults then
+		warn("[MatchService] Erro ao calcular os resultados: " .. tostring(results))
+		results = {}
+	end
+	local shown = {}
+	local recorded = {}
+	for _, entry in results do
+		local record = participants[entry.userId]
+		if record then
+			if #shown < MAX_RESULTS then
+				table.insert(shown, entry)
+			end
+			table.insert(recorded, entry)
+		end
+	end
+	remotes.cutscene:FireAllClients({
+		victory = victory,
+		boardPosition = BoardService.GetBoardPosition(),
+		results = shown,
+		bestUserId = shown[1] and shown[1].userId or nil,
+		killPoints = MatchStats.KILL_POINTS,
+		rollPoints = MatchStats.ROLL_POINTS,
+	})
+	task.spawn(GlobalStats.RecordMatch, recorded, victory)
+
 	if victory then
 		setPhase("Victory", "O tabuleiro foi vencido!")
 		SoundUtil.Play("Victory", { Group = "Music", Volume = 0.8 })
@@ -17986,7 +19417,9 @@ function MatchService.Init(info)
 	remotes.riddle = Net.event(Net.Names.Board_Riddle)
 	remotes.eliminated = Net.event(Net.Names.Player_Eliminated)
 	remotes.notify = Net.event(Net.Names.Notify)
+	remotes.cutscene = Net.event(Net.Names.Game_EndCutscene)
 
+	MatchStats.Init()
 	MapBuilder = tryRequire("Map", "MapBuilder")
 	NPCService = tryRequire("NPC", "NPCService")
 
@@ -18022,11 +19455,106 @@ return MatchService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Folder" referent="63">
+      <Item class="ModuleScript" referent="68">
+        <Properties>
+          <string name="Name">MatchStats</string>
+          <string name="Source"><![CDATA[--!nonstrict
+-- Estatísticas da partida (servidor): bichos abatidos (golpe final) e jogadas no tabuleiro de cada jogador.
+--
+--   MatchStats.Init()
+--   MatchStats.Results(): { MatchResult }  -- ordenado do melhor para o pior
+--   MatchStats.KILL_POINTS / MatchStats.ROLL_POINTS
+--
+--   type MatchResult = { userId: number, name: string, kills: number, rolls: number, score: number }
+-- Pontos = abates × KILL_POINTS + jogadas × ROLL_POINTS. Empate: mais abates, depois mais jogadas.
+
+local Players = game:GetService("Players")
+
+local BoardService = require(script.Parent.BoardService)
+local CombatUtil = require(script.Parent.CombatUtil)
+
+local MatchStats = {}
+
+MatchStats.KILL_POINTS = 10
+MatchStats.ROLL_POINTS = 15
+
+local initialized = false
+local stats: { [number]: { userId: number, name: string, kills: number, rolls: number } } = {}
+
+local function entryFor(userId: number, name: string?)
+	local entry = stats[userId]
+	if not entry then
+		entry = { userId = userId, name = name or ("Jogador " .. userId), kills = 0, rolls = 0 }
+		stats[userId] = entry
+	elseif name then
+		entry.name = name
+	end
+	return entry
+end
+
+local function onPlayer(player: Player)
+	entryFor(player.UserId, player.DisplayName)
+end
+
+function MatchStats.Init()
+	if initialized then
+		return
+	end
+	initialized = true
+	Players.PlayerAdded:Connect(onPlayer)
+	for _, player in Players:GetPlayers() do
+		onPlayer(player)
+	end
+	CombatUtil.EnemyKilled:Connect(function(attacker: Player)
+		if typeof(attacker) == "Instance" and attacker:IsA("Player") then
+			local entry = entryFor(attacker.UserId, attacker.DisplayName)
+			entry.kills += 1
+		end
+	end)
+	BoardService.Rolled:Connect(function(result)
+		if type(result) == "table" and type(result.rollerUserId) == "number" then
+			local player = Players:GetPlayerByUserId(result.rollerUserId)
+			local entry = entryFor(result.rollerUserId, player and player.DisplayName or nil)
+			entry.rolls += 1
+		end
+	end)
+end
+
+function MatchStats.Results()
+	local list = {}
+	for _, entry in stats do
+		table.insert(list, {
+			userId = entry.userId,
+			name = entry.name,
+			kills = entry.kills,
+			rolls = entry.rolls,
+			score = entry.kills * MatchStats.KILL_POINTS + entry.rolls * MatchStats.ROLL_POINTS,
+		})
+	end
+	table.sort(list, function(a, b)
+		if a.score ~= b.score then
+			return a.score > b.score
+		end
+		if a.kills ~= b.kills then
+			return a.kills > b.kills
+		end
+		if a.rolls ~= b.rolls then
+			return a.rolls > b.rolls
+		end
+		return a.userId < b.userId
+	end)
+	return list
+end
+
+return MatchStats
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Folder" referent="69">
         <Properties>
           <string name="Name">NPC</string>
         </Properties>
-        <Item class="ModuleScript" referent="64">
+        <Item class="ModuleScript" referent="70">
           <Properties>
             <string name="Name">Brain</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -18488,7 +20016,7 @@ return Brain
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="65">
+        <Item class="ModuleScript" referent="71">
           <Properties>
             <string name="Name">Effects</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -19001,7 +20529,7 @@ return Effects
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="66">
+        <Item class="ModuleScript" referent="72">
           <Properties>
             <string name="Name">HealthBar</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -19121,7 +20649,7 @@ return HealthBar
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="67">
+        <Item class="ModuleScript" referent="73">
           <Properties>
             <string name="Name">HunterAI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -19410,7 +20938,7 @@ return HunterAI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="68">
+        <Item class="ModuleScript" referent="74">
           <Properties>
             <string name="Name">Kinds</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -19588,7 +21116,7 @@ return Kinds
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="69">
+        <Item class="ModuleScript" referent="75">
           <Properties>
             <string name="Name">LionAI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -19727,7 +21255,7 @@ return LionAI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="70">
+        <Item class="ModuleScript" referent="76">
           <Properties>
             <string name="Name">MonkeyAI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -19933,7 +21461,7 @@ return MonkeyAI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="71">
+        <Item class="ModuleScript" referent="77">
           <Properties>
             <string name="Name">MosquitoAI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -20301,7 +21829,7 @@ return MosquitoAI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="72">
+        <Item class="ModuleScript" referent="78">
           <Properties>
             <string name="Name">NPCService</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -21033,7 +22561,7 @@ return NPCService
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="73">
+        <Item class="ModuleScript" referent="79">
           <Properties>
             <string name="Name">PlantAI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -21226,7 +22754,7 @@ return PlantAI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="74">
+        <Item class="ModuleScript" referent="80">
           <Properties>
             <string name="Name">Projectiles</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -21493,7 +23021,7 @@ return Projectiles
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="75">
+        <Item class="ModuleScript" referent="81">
           <Properties>
             <string name="Name">Rigs</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -22098,7 +23626,7 @@ return Rigs
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="76">
+        <Item class="ModuleScript" referent="82">
           <Properties>
             <string name="Name">SpiderAI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -22231,11 +23759,11 @@ return SpiderAI
           </Properties>
         </Item>
       </Item>
-      <Item class="Folder" referent="77">
+      <Item class="Folder" referent="83">
         <Properties>
           <string name="Name">Weapons</string>
         </Properties>
-        <Item class="ModuleScript" referent="78">
+        <Item class="ModuleScript" referent="84">
           <Properties>
             <string name="Name">Combat</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -22821,7 +24349,7 @@ return Combat
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="79">
+        <Item class="ModuleScript" referent="85">
           <Properties>
             <string name="Name">Definitions</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -23021,7 +24549,7 @@ return Definitions
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="80">
+        <Item class="ModuleScript" referent="86">
           <Properties>
             <string name="Name">Inventory</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -23188,7 +24716,7 @@ return Inventory
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="81">
+        <Item class="ModuleScript" referent="87">
           <Properties>
             <string name="Name">Spawner</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -23632,7 +25160,7 @@ return Spawner
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="82">
+        <Item class="ModuleScript" referent="88">
           <Properties>
             <string name="Name">ToolFactory</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -24021,7 +25549,7 @@ return ToolFactory
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="83">
+        <Item class="ModuleScript" referent="89">
           <Properties>
             <string name="Name">WeaponService</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -24312,11 +25840,11 @@ return WeaponService
         </Item>
       </Item>
     </Item>
-    <Item class="Folder" referent="84">
+    <Item class="Folder" referent="90">
       <Properties>
         <string name="Name">Lobby</string>
       </Properties>
-      <Item class="ModuleScript" referent="85">
+      <Item class="ModuleScript" referent="91">
         <Properties>
           <string name="Name">DemoRoom</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -25375,6 +26903,26 @@ function DemoRoom.Build(): Model
 	})
 	markers:SetAttribute("DemoCameraCFrame", cameraCFrame)
 
+	-- Boneco do jogador na sala (cópia local do personagem, ver MenuPuppet): no tapete, virado de lado
+	-- para a câmera. O CFrame marca o chão sob os pés.
+	local previousCharacter = markers:FindFirstChild("DemoCharacter")
+	if previousCharacter then
+		previousCharacter:Destroy()
+	end
+	local characterCFrame = CFrame.lookAt(at(-5, 0, -4), at(4, 0, -16))
+	PartBuilder.part({
+		Name = "DemoCharacter",
+		Size = Vector3.one,
+		CFrame = characterCFrame,
+		Transparency = 1,
+		CanCollide = false,
+		CanQuery = false,
+		CanTouch = false,
+		CastShadow = false,
+		Parent = markers,
+	})
+	markers:SetAttribute("DemoCharacterCFrame", characterCFrame)
+
 	return root
 end
 
@@ -25382,14 +26930,181 @@ return DemoRoom
 ]]></string>
         </Properties>
       </Item>
-      <Item class="Script" referent="86">
+      <Item class="ModuleScript" referent="92">
+        <Properties>
+          <string name="Name">LeaderboardService</string>
+          <string name="Source"><![CDATA[--!nonstrict
+-- Placar global no lobby (servidor).
+--   * busca os melhores jogadores (ServerShared/GlobalStats) ao ligar e a cada REFRESH segundos;
+--   * responde Leaderboard_Get e avisa os clientes com Leaderboard_Update (o menu mostra no painel "Placar");
+--   * escreve no quadro de pedra da parede do hub.
+--
+--   LeaderboardService.Init()
+--
+--   LeaderboardPayload = { available: boolean, entries: { { rank, userId, name, points, kills?, wins? } },
+--                          updatedAt: number }
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
+local Net = require(ReplicatedStorage.Shared.Net)
+local PartBuilder = require(ReplicatedStorage.Shared.Util.PartBuilder)
+
+local GlobalStats = require(ServerScriptService.ServerShared.GlobalStats)
+
+local LeaderboardService = {}
+
+local TOP = 10
+local REFRESH = 60
+local BOARD_PIXELS_PER_STUD = 40
+
+local initialized = false
+local payload = { available = false, entries = {}, updatedAt = 0 }
+local boardRows: { TextLabel } = {}
+local boardStatus: TextLabel? = nil
+
+-- Quadro do hub -------------------------------------------------------------------------------------
+
+local function buildBoard()
+	local origin = GameConfig.HUB_ORIGIN
+	-- Parede esquerda (x = -46) do hub, entre as tochas de z = 0 e z = 27, virado para dentro.
+	local position = origin + Vector3.new(-45.5, 10, 13.5)
+	local cframe = CFrame.lookAt(position, position + Vector3.new(1, 0, 0))
+
+	local model = PartBuilder.model("QuadroPlacar")
+	local slab = PartBuilder.part({
+		Name = "Lousa",
+		Size = Vector3.new(17, 13, 0.8),
+		CFrame = cframe,
+		Color = Color3.fromRGB(64, 58, 50),
+		Material = Enum.Material.Slate,
+		Parent = model,
+	})
+	PartBuilder.part({
+		Name = "Moldura",
+		Size = Vector3.new(18.2, 14.2, 0.6),
+		CFrame = cframe * CFrame.new(0, 0, 0.3),
+		Color = Color3.fromRGB(150, 112, 34),
+		Material = Enum.Material.Metal,
+		Parent = model,
+	})
+
+	local gui = Instance.new("SurfaceGui")
+	gui.Name = "Placar"
+	gui.Face = Enum.NormalId.Front
+	gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	gui.PixelsPerStud = BOARD_PIXELS_PER_STUD
+	gui.LightInfluence = 0.4
+	gui.Brightness = 1.6
+	gui.Parent = slab
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Titulo"
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, 0, 0, 80)
+	title.Font = Enum.Font.Fondamento
+	title.TextSize = 58
+	title.TextColor3 = Color3.fromRGB(240, 202, 96)
+	title.Text = "Placar Global"
+	title.Parent = gui
+
+	local status = Instance.new("TextLabel")
+	status.Name = "Status"
+	status.BackgroundTransparency = 1
+	status.Position = UDim2.fromOffset(0, 74)
+	status.Size = UDim2.new(1, 0, 0, 30)
+	status.Font = Enum.Font.BuilderSans
+	status.TextSize = 22
+	status.TextColor3 = Color3.fromRGB(196, 186, 160)
+	status.Text = "Carregando…"
+	status.Parent = gui
+	boardStatus = status
+
+	for index = 1, TOP do
+		local row = Instance.new("TextLabel")
+		row.Name = "Linha" .. index
+		row.BackgroundTransparency = 1
+		row.Position = UDim2.new(0, 30, 0, 108 + (index - 1) * 40)
+		row.Size = UDim2.new(1, -60, 0, 38)
+		row.Font = if index <= 3 then Enum.Font.BuilderSansBold else Enum.Font.BuilderSans
+		row.TextSize = 28
+		row.TextXAlignment = Enum.TextXAlignment.Left
+		row.TextColor3 = if index == 1
+			then Color3.fromRGB(255, 214, 90)
+			elseif index <= 3 then Color3.fromRGB(236, 226, 200)
+			else Color3.fromRGB(206, 198, 176)
+		row.Text = ""
+		row.Parent = gui
+		table.insert(boardRows, row)
+	end
+
+	model.Parent = workspace
+end
+
+local function updateBoard()
+	if boardStatus then
+		if not payload.available then
+			boardStatus.Text = "Placar indisponível agora."
+		elseif #payload.entries == 0 then
+			boardStatus.Text = "Ninguém pontuou ainda. Seja o primeiro!"
+		else
+			boardStatus.Text = "Pontos somados em todas as partidas"
+		end
+	end
+	for index, row in boardRows do
+		local entry = payload.entries[index]
+		row.Text = if entry then ("%d.  %s  —  %d pts"):format(index, entry.name, entry.points) else ""
+	end
+end
+
+-- Atualização ---------------------------------------------------------------------------------------
+
+local function refresh()
+	local ok, entries, err = pcall(GlobalStats.GetTop, TOP)
+	if ok and entries then
+		payload = { available = true, entries = entries, updatedAt = os.time() }
+	else
+		payload = { available = false, entries = payload.entries, updatedAt = os.time() }
+		warn("[LeaderboardService] Não foi possível ler o placar: " .. tostring(if ok then err else entries))
+	end
+	updateBoard()
+	Net.event(Net.Names.Leaderboard_Update):FireAllClients(payload)
+end
+
+function LeaderboardService.Init()
+	if initialized then
+		return
+	end
+	initialized = true
+	Net.event(Net.Names.Leaderboard_Update)
+	Net.func(Net.Names.Leaderboard_Get).OnServerInvoke = function()
+		return payload
+	end
+	local ok, err = pcall(buildBoard)
+	if not ok then
+		warn("[LeaderboardService] Erro ao montar o quadro do hub: " .. tostring(err))
+	end
+	task.spawn(function()
+		while true do
+			refresh()
+			task.wait(REFRESH)
+		end
+	end)
+end
+
+return LeaderboardService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="Script" referent="93">
         <Properties>
           <string name="Name">LobbyMain</string>
           <token name="RunContext">0</token>
           <string name="Source"><![CDATA[--!nonstrict
 -- Entrada do servidor do LOBBY. Ordem do contrato:
 --   SoundUtil.EnsureGroups → iluminação → LobbyWorld.Build → DemoRoom.Build → SettingsStore.Init →
---   PartyService.Init → TeleportHandler.Init
+--   CharacterService.Init (personagens R6) → PartyService.Init → LeaderboardService.Init → TeleportHandler.Init
 -- Cada etapa roda protegida: um erro numa delas não impede as outras de iniciar.
 -- O place é único: este script só roda nos servidores públicos (ver Shared/PlaceMode).
 
@@ -25401,6 +27116,12 @@ if require(ReplicatedStorage.Shared.PlaceMode).Get() ~= "lobby" then
 	return -- servidor reservado: quem roda aqui é o GameMain
 end
 
+-- Personagens R6 são criados por código (ServerShared/CharacterService), não pelo spawn padrão do Roblox.
+-- Desligado antes de qualquer espera, para ninguém nascer com o avatar padrão.
+local Players = game:GetService("Players")
+Players.CharacterAutoLoads = false
+
+local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local LobbyWorld = require(script.Parent.LobbyWorld)
@@ -25504,12 +27225,30 @@ end)
 step("SettingsStore.Init", function()
 	requireModule(ServerScriptService:FindFirstChild("ServerShared"), "SettingsStore").Init()
 end)
+step("CharacterService.Init", function()
+	requireModule(ServerScriptService:FindFirstChild("ServerShared"), "CharacterService").Init({
+		autoSpawn = true,
+		respawnDelay = 3,
+		-- nasce no cubículo do menu (o PartyService leva para o hub se for o caso)
+		spawnCFrame = function(): CFrame?
+			local markers = workspace:FindFirstChild("LobbyMarkers")
+			local spawn = markers and markers:FindFirstChild("MenuSpawn")
+			if spawn and spawn:IsA("BasePart") then
+				return CFrame.new(spawn.Position + Vector3.new(0, 3.5, 0))
+			end
+			return CFrame.new(GameConfig.MENU_AREA_ORIGIN + Vector3.new(0, 3.5, 30))
+		end,
+	})
+end)
 step("PartyService.Init", PartyService.Init)
+step("LeaderboardService.Init", function()
+	requireModule(script.Parent, "LeaderboardService").Init()
+end)
 step("TeleportHandler.Init", TeleportHandler.Init)
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="87">
+      <Item class="ModuleScript" referent="94">
         <Properties>
           <string name="Name">LobbyWorld</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -25519,7 +27258,7 @@ step("TeleportHandler.Init", TeleportHandler.Init)
 --   * Cubículo fechado ATRÁS da câmera do menu com o SpawnLocation (os personagens não aparecem no menu).
 --   * Hub multiplayer (GameConfig.HUB_ORIGIN): salão de um templo na selva com colunas, tochas,
 --     estátua do tabuleiro no centro, cipós e uma cachoeira decorativa.
--- Também cria workspace.LobbyMarkers com MenuCamera, MenuSpawn, HubSpawn e HubCamera.
+-- Também cria workspace.LobbyMarkers com MenuCamera, MenuCharacter, MenuSpawn, HubSpawn e HubCamera.
 -- Nada é construído perto de GameConfig.DEMO_ROOM_ORIGIN (a sala de demonstração fica lá).
 --
 -- Luzes que o cliente anima (LobbyAmbience): atributo "Flicker" (tremulação de vela/tocha) ou "Pulse"
@@ -26390,6 +28129,9 @@ local function buildMenuScene(root: Instance, markers: Instance)
 	-- Câmera do menu: enquadra a mesa pela direita da tela (o menu fica à esquerda), levemente de cima.
 	local cameraPosition = m(-4, 8.5, 9)
 	setMarker(markers, "MenuCamera", CFrame.lookAt(cameraPosition, cameraPosition + Vector3.new(0, -0.306, -1)))
+	-- Boneco do jogador no menu (cópia local do personagem, ver MenuPuppet): em pé atrás da mesa,
+	-- de frente para a câmera. O CFrame marca o chão sob os pés.
+	setMarker(markers, "MenuCharacter", CFrame.lookAt(m(2.2, 0, -9.4), m(-3, 0, 9)))
 
 	-- Casca: interior x -20..20, z -18..18, piso em y 0, paredes laterais até 10 e cumeeira em 18,4.
 	local shell = PartBuilder.model("Sotao", scene)
@@ -27211,7 +28953,7 @@ return LobbyWorld
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="88">
+      <Item class="ModuleScript" referent="95">
         <Properties>
           <string name="Name">PartyService</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -28046,7 +29788,7 @@ return PartyService
 ]]></string>
         </Properties>
       </Item>
-      <Item class="ModuleScript" referent="89">
+      <Item class="ModuleScript" referent="96">
         <Properties>
           <string name="Name">TeleportHandler</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -28173,7 +29915,7 @@ function TeleportHandler.IsPending(player: Player): boolean
 	return (pendingUntil[player] or 0) > os.clock()
 end
 
--- Garante um TeleportData bem formado (o place do jogo valida de novo ao ler).
+-- Garante um TeleportData bem formado (a partida valida de novo ao ler).
 local function buildTeleportData(data: any, list: { Player }): TeleportData
 	local source = type(data) == "table" and data or {}
 	local expected = {}
@@ -28383,11 +30125,381 @@ return TeleportHandler
         </Properties>
       </Item>
     </Item>
-    <Item class="Folder" referent="90">
+    <Item class="Folder" referent="97">
       <Properties>
         <string name="Name">ServerShared</string>
       </Properties>
-      <Item class="ModuleScript" referent="91">
+      <Item class="ModuleScript" referent="98">
+        <Properties>
+          <string name="Name">CharacterService</string>
+          <string name="Source"><![CDATA[--!nonstrict
+-- Personagens R6 criados por código (lobby e partida), independentes do tipo de avatar da experiência.
+-- A aparência do jogador (roupas, cores, acessórios) vem da HumanoidDescription dele, montada num rig R6.
+-- O script "Animate" padrão é removido: a animação é procedural (Shared/Character/R6Animator, no cliente).
+--
+--   CharacterService.Init(options?)
+--     options.autoSpawn: boolean?        -- cria o personagem ao entrar e de novo depois de morrer (lobby)
+--     options.respawnDelay: number?      -- segundos até renascer (padrão 3)
+--     options.spawnCFrame: ((Player) -> CFrame?)?  -- onde nascer (CFrame da HumanoidRootPart)
+--   CharacterService.Spawn(player, cframe?): Model?   -- cede (busca a aparência); nil se falhar
+--
+-- Também recebe Char_MoveState ("none" | "climb") e grava no atributo "MoveState" do personagem, para os
+-- outros clientes saberem que ele está escalando.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Net = require(ReplicatedStorage.Shared.Net)
+
+local CharacterService = {}
+
+local DEFAULT_RESPAWN_DELAY = 3
+local MOVE_STATES = { none = true, climb = true }
+local DESCRIPTION_ATTEMPTS = 2
+
+local initialized = false
+local options: { [string]: any } = {}
+local descriptions: { [number]: HumanoidDescription } = {}
+local spawning: { [Player]: boolean } = {}
+
+local function getDescription(userId: number): HumanoidDescription
+	local cached = descriptions[userId]
+	if cached then
+		return cached:Clone()
+	end
+	if userId > 0 then
+		for attempt = 1, DESCRIPTION_ATTEMPTS do
+			local ok, result = pcall(function()
+				return Players:GetHumanoidDescriptionFromUserId(userId)
+			end)
+			if ok and result then
+				descriptions[userId] = result
+				return result:Clone()
+			end
+			warn(
+				("[CharacterService] Aparência de %d indisponível (tentativa %d): %s"):format(
+					userId,
+					attempt,
+					tostring(result)
+				)
+			)
+			task.wait(0.5)
+		end
+	end
+	return Instance.new("HumanoidDescription")
+end
+
+local function buildModel(description: HumanoidDescription): Model?
+	local ok, model = pcall(function()
+		return Players:CreateHumanoidModelFromDescription(description, Enum.HumanoidRigType.R6)
+	end)
+	if ok and model then
+		return model
+	end
+	warn("[CharacterService] Falha ao montar o personagem: " .. tostring(model))
+	-- Aparência com algum item inválido: tenta com a aparência padrão.
+	ok, model = pcall(function()
+		return Players:CreateHumanoidModelFromDescription(Instance.new("HumanoidDescription"), Enum.HumanoidRigType.R6)
+	end)
+	if ok and model then
+		return model
+	end
+	warn("[CharacterService] Falha ao montar o personagem padrão: " .. tostring(model))
+	return nil
+end
+
+-- Cria (ou recria) o personagem R6 do jogador. Cede.
+function CharacterService.Spawn(player: Player, cframe: CFrame?): Model?
+	if not player.Parent or spawning[player] then
+		return nil
+	end
+	spawning[player] = true
+	local description = getDescription(player.UserId)
+	local model = player.Parent and buildModel(description) or nil
+	spawning[player] = nil
+	if not model or not player.Parent then
+		if model then
+			model:Destroy()
+		end
+		return nil
+	end
+
+	model.Name = player.Name
+	local animate = model:FindFirstChild("Animate")
+	if animate then
+		animate:Destroy()
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.DisplayName = player.DisplayName
+	end
+
+	local target = cframe
+	if not target and options.spawnCFrame then
+		local ok, result = pcall(options.spawnCFrame, player)
+		if ok and typeof(result) == "CFrame" then
+			target = result
+		end
+	end
+	if target then
+		model:PivotTo(target)
+	end
+
+	local old = player.Character
+	player.Character = model
+	model.Parent = workspace
+	if old and old ~= model then
+		old:Destroy()
+	end
+	return model
+end
+
+local function watchDeath(player: Player, character: Model)
+	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 5)
+	if not humanoid or not humanoid:IsA("Humanoid") then
+		return
+	end
+	humanoid.Died:Once(function()
+		task.wait(options.respawnDelay or DEFAULT_RESPAWN_DELAY)
+		if player.Parent and player.Character == character then
+			CharacterService.Spawn(player)
+		end
+	end)
+end
+
+local function onMoveState(player: Player, state: any)
+	local character = player.Character
+	if not character or type(state) ~= "string" or not MOVE_STATES[state] then
+		return
+	end
+	local value = if state == "none" then nil else state
+	if character:GetAttribute("MoveState") ~= value then
+		character:SetAttribute("MoveState", value)
+	end
+end
+
+function CharacterService.Init(initOptions: { [string]: any }?)
+	if initialized then
+		return
+	end
+	initialized = true
+	options = initOptions or {}
+
+	Net.event(Net.Names.Char_MoveState).OnServerEvent:Connect(onMoveState)
+
+	Players.PlayerRemoving:Connect(function(player)
+		spawning[player] = nil
+		descriptions[player.UserId] = nil
+	end)
+
+	if options.autoSpawn then
+		local function onPlayer(player: Player)
+			player.CharacterAdded:Connect(function(character)
+				task.spawn(watchDeath, player, character)
+			end)
+			if not player.Character then
+				task.spawn(CharacterService.Spawn, player)
+			end
+		end
+		Players.PlayerAdded:Connect(onPlayer)
+		for _, player in Players:GetPlayers() do
+			task.spawn(onPlayer, player)
+		end
+	end
+end
+
+return CharacterService
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="99">
+        <Properties>
+          <string name="Name">GlobalStats</string>
+          <string name="Source"><![CDATA[--!nonstrict
+-- Placar global entre partidas (DataStore). A partida grava; o lobby lê e mostra os melhores.
+--
+--   GlobalStats.RecordMatch(entries, victory)   -- cede; chame com task.spawn
+--       entries: { { userId: number, kills: number, rolls: number, score: number } }
+--   GlobalStats.GetTop(count): ({ LeaderboardEntry }?, string?)   -- cede
+--       LeaderboardEntry = { rank, userId, name, points, kills, rolls, wins, matches }
+--
+-- Pontos do placar = pontos da partida (abates e jogadas) + VICTORY_BONUS para quem venceu.
+-- OrderedDataStore guarda só os pontos (para ordenar); um DataStore comum guarda os detalhes.
+-- Sem acesso ao DataStore (Studio sem API), as funções avisam uma vez e devolvem vazio.
+
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local UserService = game:GetService("UserService")
+
+local GlobalStats = {}
+
+GlobalStats.VICTORY_BONUS = 50
+
+local ORDERED_NAME = "PlacarGlobal_Pontos_v1"
+local DETAILS_NAME = "PlacarGlobal_Detalhes_v1"
+local ATTEMPTS = 3
+
+local ordered: OrderedDataStore? = nil
+local details: GlobalDataStore? = nil
+local unavailable = false
+local warned = false
+local nameCache: { [number]: string } = {}
+
+local function warnOnce(message: string)
+	if not warned then
+		warned = true
+		warn("[GlobalStats] " .. message)
+	end
+end
+
+local function stores(): boolean
+	if unavailable then
+		return false
+	end
+	if ordered and details then
+		return true
+	end
+	local ok, err = pcall(function()
+		ordered = DataStoreService:GetOrderedDataStore(ORDERED_NAME)
+		details = DataStoreService:GetDataStore(DETAILS_NAME)
+	end)
+	if not ok then
+		unavailable = true
+		warnOnce("DataStore indisponível; o placar global não vai funcionar aqui: " .. tostring(err))
+		return false
+	end
+	return true
+end
+
+local function keyFor(userId: number): string
+	return "u_" .. tostring(userId)
+end
+
+local function retry(label: string, fn: () -> any): (boolean, any)
+	local lastError = nil
+	for attempt = 1, ATTEMPTS do
+		local ok, result = pcall(fn)
+		if ok then
+			return true, result
+		end
+		lastError = result
+		if attempt < ATTEMPTS then
+			task.wait(2 ^ attempt)
+		end
+	end
+	warn(("[GlobalStats] %s falhou: %s"):format(label, tostring(lastError)))
+	return false, lastError
+end
+
+local function whole(value: any): number
+	if type(value) ~= "number" or value ~= value then
+		return 0
+	end
+	return math.max(math.floor(value), 0)
+end
+
+function GlobalStats.RecordMatch(entries: { any }, victory: boolean)
+	if type(entries) ~= "table" or not stores() then
+		return
+	end
+	for _, entry in entries do
+		local userId = type(entry) == "table" and entry.userId
+		if type(userId) == "number" and userId > 0 then
+			local kills, rolls = whole(entry.kills), whole(entry.rolls)
+			local points = whole(entry.score) + (if victory then GlobalStats.VICTORY_BONUS else 0)
+			local key = keyFor(userId)
+			if points > 0 then
+				retry("IncrementAsync " .. key, function()
+					return (ordered :: OrderedDataStore):IncrementAsync(key, points)
+				end)
+			end
+			retry("UpdateAsync " .. key, function()
+				return (details :: GlobalDataStore):UpdateAsync(key, function(old)
+					local data = type(old) == "table" and old or {}
+					return {
+						points = whole(data.points) + points,
+						kills = whole(data.kills) + kills,
+						rolls = whole(data.rolls) + rolls,
+						wins = whole(data.wins) + (if victory then 1 else 0),
+						matches = whole(data.matches) + 1,
+					}
+				end)
+			end)
+		end
+	end
+end
+
+local function resolveNames(userIds: { number })
+	local missing = {}
+	for _, userId in userIds do
+		if not nameCache[userId] then
+			table.insert(missing, userId)
+		end
+	end
+	if #missing == 0 then
+		return
+	end
+	local ok, infos = pcall(function()
+		return UserService:GetUserInfosByUserIdsAsync(missing)
+	end)
+	if ok and type(infos) == "table" then
+		for _, info in infos do
+			if type(info) == "table" and type(info.Id) == "number" then
+				nameCache[info.Id] = info.DisplayName or info.Username
+			end
+		end
+	end
+	for _, userId in missing do
+		if not nameCache[userId] then
+			local nameOk, name = pcall(function()
+				return Players:GetNameFromUserIdAsync(userId)
+			end)
+			nameCache[userId] = if nameOk and type(name) == "string" then name else ("Jogador " .. userId)
+		end
+	end
+end
+
+function GlobalStats.GetTop(count: number): ({ any }?, string?)
+	if not stores() then
+		return nil, "indisponível"
+	end
+	local ok, pages = retry("GetSortedAsync", function()
+		return (ordered :: OrderedDataStore):GetSortedAsync(false, math.clamp(count, 1, 100))
+	end)
+	if not ok or not pages then
+		return nil, tostring(pages)
+	end
+	local page = pages:GetCurrentPage()
+	local list = {}
+	local ids = {}
+	for index, item in page do
+		local userId = tonumber(string.match(tostring(item.key), "^u_(%d+)$"))
+		if userId then
+			table.insert(ids, userId)
+			table.insert(list, { rank = index, userId = userId, points = whole(item.value) })
+		end
+	end
+	resolveNames(ids)
+	for _, entry in list do
+		entry.name = nameCache[entry.userId] or ("Jogador " .. entry.userId)
+		local detailOk, data = pcall(function()
+			return (details :: GlobalDataStore):GetAsync(keyFor(entry.userId))
+		end)
+		if detailOk and type(data) == "table" then
+			entry.kills = whole(data.kills)
+			entry.rolls = whole(data.rolls)
+			entry.wins = whole(data.wins)
+			entry.matches = whole(data.matches)
+		end
+	end
+	return list, nil
+end
+
+return GlobalStats
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="100">
         <Properties>
           <string name="Name">SettingsStore</string>
           <string name="Source"><![CDATA[--!nonstrict
@@ -28844,19 +30956,19 @@ return SettingsStore
       </Item>
     </Item>
   </Item>
-  <Item class="StarterPlayer" referent="92">
+  <Item class="StarterPlayer" referent="101">
     <Properties>
       <string name="Name">StarterPlayer</string>
     </Properties>
-    <Item class="StarterPlayerScripts" referent="93">
+    <Item class="StarterPlayerScripts" referent="102">
       <Properties>
         <string name="Name">StarterPlayerScripts</string>
       </Properties>
-      <Item class="Folder" referent="94">
+      <Item class="Folder" referent="103">
         <Properties>
           <string name="Name">Game</string>
         </Properties>
-        <Item class="ModuleScript" referent="95">
+        <Item class="ModuleScript" referent="104">
           <Properties>
             <string name="Name">BoardClient</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -28969,7 +31081,383 @@ return BoardClient
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="96">
+        <Item class="ModuleScript" referent="105">
+          <Properties>
+            <string name="Name">EndCutscene</string>
+            <string name="Source"><![CDATA[--!nonstrict
+-- Cutscene do fim da partida (cliente) e tela do melhor jogador.
+--   1. a câmera treme cada vez mais forte e avança até o tabuleiro;
+--   2. a tela fica branca;
+--   3. aparece o melhor da partida (foto, nome, bichos abatidos, jogadas no tabuleiro e pontos) e a
+--      classificação de todos, com a contagem para voltar ao lobby.
+--
+--   EndCutscene.Init()
+--   EndCutscene.IsPlaying(): boolean
+--   EndCutscene.Started: Signal   -- o GameClient desliga a primeira pessoa e a corrida
+--
+-- Payload (Game_EndCutscene): { victory: boolean, boardPosition: Vector3, results: { MatchResult },
+--   bestUserId: number?, killPoints: number, rollPoints: number }
+--   MatchResult = { userId, name, kills, rolls, score }
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+
+local Net = require(ReplicatedStorage.Shared.Net)
+local Signal = require(ReplicatedStorage.Shared.Util.Signal)
+local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
+local UIKit = require(ReplicatedStorage.Shared.UI.UIKit)
+
+local EndCutscene = {}
+EndCutscene.Started = Signal.new()
+
+local CAMERA_STEP = "SelvaCutsceneFinal"
+local APPROACH_TIME = 4.4
+local WHITE_START = 3.0
+local WHITE_TIME = 1.3
+local FINAL_DISTANCE = 3.2 -- studs entre a câmera e o tabuleiro no fim
+local PARCHMENT = Color3.fromRGB(244, 236, 214)
+local INK = Color3.fromRGB(46, 34, 22)
+local INK_SOFT = Color3.fromRGB(110, 88, 60)
+local GOLD = Color3.fromRGB(196, 140, 46)
+
+local LocalPlayer = Players.LocalPlayer
+local Theme = UIKit.Theme
+
+local initialized = false
+local playing = false
+local countdownLabel: TextLabel? = nil
+
+local function num(value: any, default: number): number
+	if type(value) == "number" and value == value then
+		return value
+	end
+	return default
+end
+
+local function sanitize(payload)
+	local results = {}
+	if type(payload.results) == "table" then
+		for _, entry in payload.results do
+			if type(entry) == "table" and type(entry.userId) == "number" then
+				table.insert(results, {
+					userId = entry.userId,
+					name = if type(entry.name) == "string" then entry.name else ("Jogador " .. entry.userId),
+					kills = math.max(math.floor(num(entry.kills, 0)), 0),
+					rolls = math.max(math.floor(num(entry.rolls, 0)), 0),
+					score = math.max(math.floor(num(entry.score, 0)), 0),
+				})
+			end
+		end
+	end
+	return {
+		victory = payload.victory == true,
+		boardPosition = if typeof(payload.boardPosition) == "Vector3" then payload.boardPosition else nil,
+		results = results,
+		bestUserId = if type(payload.bestUserId) == "number" then payload.bestUserId else nil,
+	}
+end
+
+local function plural(count: number, one: string, many: string): string
+	return ("%d %s"):format(count, if count == 1 then one else many)
+end
+
+local function statsLine(entry): string
+	return ("%s · %s · %s"):format(
+		plural(entry.kills, "bicho abatido", "bichos abatidos"),
+		plural(entry.rolls, "jogada no tabuleiro", "jogadas no tabuleiro"),
+		plural(entry.score, "ponto", "pontos")
+	)
+end
+
+local function setControlsEnabled(enabled: boolean)
+	pcall(function()
+		local playerModule = LocalPlayer:WaitForChild("PlayerScripts"):FindFirstChild("PlayerModule")
+		if playerModule then
+			local controls = (require :: any)(playerModule):GetControls()
+			if enabled then
+				controls:Enable()
+			else
+				controls:Disable()
+			end
+		end
+	end)
+end
+
+-- Câmera ----------------------------------------------------------------------------------------
+
+local function runCamera(boardPosition: Vector3?)
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	local start = camera.CFrame
+	local startFov = camera.FieldOfView
+	local focus = (boardPosition or start.Position + start.LookVector * 20) + Vector3.new(0, 1.5, 0)
+	local away = start.Position - focus
+	away = Vector3.new(away.X, 0, away.Z)
+	if away.Magnitude < 0.5 then
+		away = Vector3.new(0, 0, 1)
+	end
+	local finalPosition = focus + away.Unit * FINAL_DISTANCE + Vector3.new(0, 2.2, 0)
+	local began = os.clock()
+	local seed = math.random() * 100
+
+	camera.CameraType = Enum.CameraType.Scriptable
+	RunService:BindToRenderStep(CAMERA_STEP, Enum.RenderPriority.Last.Value, function()
+		local elapsed = os.clock() - began
+		local alpha = math.clamp(elapsed / APPROACH_TIME, 0, 1)
+		local eased = alpha ^ 2.2 -- acelera rumo ao tabuleiro
+		local position = start.Position:Lerp(finalPosition, eased)
+		local base = CFrame.lookAt(position, focus)
+		-- tremor que cresce até o branco
+		local strength = 0.08 + math.min(elapsed / APPROACH_TIME, 1.2) * 0.75
+		local t = elapsed * 18
+		local shake = CFrame.new(math.noise(seed, t) * strength, math.noise(seed + 10, t) * strength, 0)
+			* CFrame.Angles(
+				math.noise(seed + 20, t) * strength * 0.05,
+				math.noise(seed + 30, t) * strength * 0.05,
+				math.noise(seed + 40, t) * strength * 0.09
+			)
+		camera.CameraType = Enum.CameraType.Scriptable
+		camera.CFrame = base * shake
+		camera.FieldOfView = startFov + (55 - startFov) * eased
+	end)
+end
+
+-- Tela de resultados ----------------------------------------------------------------------------
+
+local function thumbnail(userId: number): string
+	if userId <= 0 then
+		return ""
+	end
+	local ok, image = pcall(function()
+		return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size420x420)
+	end)
+	return if ok and type(image) == "string" then image else ""
+end
+
+local function buildResults(gui: ScreenGui, data)
+	local root = UIKit.Create("CanvasGroup", {
+		Name = "Resultados",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		GroupTransparency = 1,
+		Parent = gui,
+	}) :: CanvasGroup
+
+	local column = UIKit.Frame({
+		Name = "Coluna",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(0.92, 0, 0.92, 0),
+		Parent = root,
+	})
+	UIKit.Create("UISizeConstraint", { MaxSize = Vector2.new(720, 680), Parent = column })
+	local layout = UIKit.ListLayout(column, 10)
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Center
+
+	UIKit.Title(if data.victory then "O tabuleiro foi vencido!" else "A selva venceu…", {
+		TextColor3 = if data.victory then GOLD else Color3.fromRGB(150, 50, 40),
+		TextStrokeTransparency = 1,
+		TextSize = 44,
+		TextScaled = false,
+		LayoutOrder = 1,
+		Parent = column,
+	})
+
+	local best = nil
+	for _, entry in data.results do
+		if entry.userId == data.bestUserId then
+			best = entry
+		end
+	end
+	best = best or data.results[1]
+
+	UIKit.Label({
+		Text = "MELHOR DA PARTIDA",
+		Font = Theme.BoldFont,
+		TextSize = 18,
+		TextColor3 = INK_SOFT,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		LayoutOrder = 2,
+		Parent = column,
+	})
+
+	local card = UIKit.Create("Frame", {
+		Name = "Melhor",
+		BackgroundColor3 = Color3.fromRGB(255, 250, 236),
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, 132),
+		LayoutOrder = 3,
+		Parent = column,
+	})
+	UIKit.Corner(card, UDim.new(0, 14))
+	UIKit.Stroke(card, GOLD, 2)
+	local photo = UIKit.Create("ImageLabel", {
+		Name = "Foto",
+		BackgroundColor3 = Color3.fromRGB(226, 214, 184),
+		BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, 14, 0.5, 0),
+		Size = UDim2.fromOffset(104, 104),
+		Image = "",
+		Parent = card,
+	}) :: ImageLabel
+	UIKit.Corner(photo, UDim.new(1, 0))
+	UIKit.Stroke(photo, GOLD, 3)
+	UIKit.Label({
+		Name = "Nome",
+		Text = if best then best.name else "Ninguém pontuou",
+		Font = Theme.TitleFont,
+		TextSize = 34,
+		TextColor3 = INK,
+		TextWrapped = false,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Position = UDim2.fromOffset(134, 22),
+		Size = UDim2.new(1, -150, 0, 42),
+		Parent = card,
+	})
+	UIKit.Label({
+		Name = "Numeros",
+		Text = if best then statsLine(best) else "Ninguém abateu bichos nem jogou o dado.",
+		TextSize = 18,
+		TextColor3 = INK_SOFT,
+		Position = UDim2.fromOffset(134, 68),
+		Size = UDim2.new(1, -150, 0, 44),
+		Parent = card,
+	})
+	if best then
+		task.spawn(function()
+			photo.Image = thumbnail(best.userId)
+		end)
+	end
+
+	if #data.results > 1 then
+		local list = UIKit.Frame({
+			Name = "Classificacao",
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			LayoutOrder = 4,
+			Parent = column,
+		})
+		UIKit.ListLayout(list, 4)
+		for index, entry in data.results do
+			local row = UIKit.Create("Frame", {
+				BackgroundColor3 = if entry.userId == LocalPlayer.UserId
+					then Color3.fromRGB(240, 222, 170)
+					else Color3.fromRGB(250, 244, 228),
+				BorderSizePixel = 0,
+				Size = UDim2.new(1, 0, 0, 34),
+				LayoutOrder = index,
+				Parent = list,
+			})
+			UIKit.Corner(row, UDim.new(0, 8))
+			UIKit.Label({
+				Text = ("%d. %s"):format(index, entry.name),
+				Font = Theme.BoldFont,
+				TextSize = 18,
+				TextColor3 = INK,
+				TextWrapped = false,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Position = UDim2.fromOffset(12, 5),
+				Size = UDim2.new(0.42, -12, 0, 24),
+				Parent = row,
+			})
+			UIKit.Label({
+				Text = ("%d bichos · %d jogadas · %d pts"):format(entry.kills, entry.rolls, entry.score),
+				TextSize = 16,
+				TextColor3 = INK_SOFT,
+				TextXAlignment = Enum.TextXAlignment.Right,
+				TextWrapped = false,
+				Position = UDim2.new(0.42, 0, 0, 5),
+				Size = UDim2.new(0.58, -12, 0, 24),
+				Parent = row,
+			})
+		end
+	end
+
+	countdownLabel = UIKit.Label({
+		Name = "Contagem",
+		Text = "Voltando ao lobby…",
+		TextSize = 17,
+		TextColor3 = INK_SOFT,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		LayoutOrder = 5,
+		Parent = column,
+	})
+	return root
+end
+
+-- Sequência -----------------------------------------------------------------------------------------
+
+local function play(payload)
+	if playing or type(payload) ~= "table" then
+		return
+	end
+	playing = true
+	local data = sanitize(payload)
+	EndCutscene.Started:Fire()
+	setControlsEnabled(false)
+	pcall(SoundUtil.Play, "Drums", { Volume = 1 })
+
+	local gui = UIKit.ScreenGui("FimDaPartida", 150)
+	local white = UIKit.Create("Frame", {
+		Name = "Branco",
+		BackgroundColor3 = Color3.new(1, 1, 1),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		Parent = gui,
+	}) :: Frame
+
+	runCamera(data.boardPosition)
+	task.wait(WHITE_START)
+	TweenService:Create(white, TweenInfo.new(WHITE_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+		BackgroundTransparency = 0,
+	}):Play()
+	task.wait(math.max(APPROACH_TIME - WHITE_START, WHITE_TIME) + 0.3)
+	RunService:UnbindFromRenderStep(CAMERA_STEP)
+
+	local results = buildResults(gui, data)
+	TweenService:Create(white, TweenInfo.new(1.2), { BackgroundColor3 = PARCHMENT }):Play()
+	TweenService:Create(results, TweenInfo.new(0.9, Enum.EasingStyle.Quad), { GroupTransparency = 0 }):Play()
+end
+
+function EndCutscene.Init()
+	if initialized then
+		return
+	end
+	initialized = true
+	Net.event(Net.Names.Game_EndCutscene).OnClientEvent:Connect(function(payload)
+		task.spawn(play, payload)
+	end)
+	-- Contagem de volta ao lobby (vem no estado da partida).
+	Net.event(Net.Names.Game_State).OnClientEvent:Connect(function(payload)
+		local label = countdownLabel
+		if not label or type(payload) ~= "table" then
+			return
+		end
+		if type(payload.countdown) == "number" then
+			label.Text = ("Voltando ao lobby em %ds…"):format(payload.countdown)
+		elseif type(payload.message) == "string" then
+			label.Text = payload.message
+		end
+	end)
+end
+
+function EndCutscene.IsPlaying(): boolean
+	return playing
+end
+
+return EndCutscene
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="106">
           <Properties>
             <string name="Name">FxClient</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -29238,17 +31726,20 @@ return FxClient
 ]]></string>
           </Properties>
         </Item>
-        <Item class="LocalScript" referent="97">
+        <Item class="LocalScript" referent="107">
           <Properties>
             <string name="Name">GameClient</string>
             <string name="Source"><![CDATA[--!nonstrict
 -- Entrada do cliente da PARTIDA:
 --   1. configurações (busca no servidor em paralelo com a tela de carregamento);
 --   2. tela de carregamento (bloqueante; pré-carrega o jogo se o jogador quiser);
---   3. interface e efeitos (HUD, enigma, efeitos, espectador, controles do tabuleiro);
---   4. avisa o servidor que está pronto (Game_ClientReady).
+--   3. interface e efeitos (HUD, enigma, efeitos, espectador, controles do tabuleiro, cutscene final);
+--   4. personagem: animação R6 de todos, primeira pessoa, corrida e escalada (desligados para quem foi
+--      eliminado e durante a cutscene final);
+--   5. avisa o servidor que está pronto (Game_ClientReady).
 -- Os módulos começam ANTES do aviso de pronto para não perder o estado que o servidor manda em resposta.
 
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
@@ -29267,6 +31758,14 @@ local RiddleUI = require(script.Parent.RiddleUI)
 local FxClient = require(script.Parent.FxClient)
 local Spectate = require(script.Parent.Spectate)
 local BoardClient = require(script.Parent.BoardClient)
+local EndCutscene = require(script.Parent.EndCutscene)
+
+local CharacterFolder = Shared:WaitForChild("Character")
+local FirstPerson = require(CharacterFolder:WaitForChild("FirstPerson"))
+local Movement = require(CharacterFolder:WaitForChild("Movement"))
+local R6Animator = require(CharacterFolder:WaitForChild("R6Animator"))
+
+local LocalPlayer = Players.LocalPlayer
 
 local TOAST_KINDS = { info = true, warning = true, danger = true, success = true }
 
@@ -29304,6 +31803,9 @@ task.spawn(function()
 	end
 end)
 
+-- Os outros jogadores já aparecem animados durante o carregamento.
+R6Animator.Init()
+
 -- 2. Tela de carregamento ----------------------------------------------------------------
 local loadingOk, loadingErr = pcall(LoadingScreen.Run, function()
 	return settingsDone
@@ -29325,6 +31827,7 @@ start("HUD", HUD)
 start("RiddleUI", RiddleUI)
 start("Spectate", Spectate)
 start("BoardClient", BoardClient)
+start("EndCutscene", EndCutscene)
 
 Net.event(Net.Names.Notify).OnClientEvent:Connect(function(text, kind)
 	if type(text) ~= "string" or text == "" then
@@ -29333,12 +31836,30 @@ Net.event(Net.Names.Notify).OnClientEvent:Connect(function(text, kind)
 	UIKit.Toast(text, TOAST_KINDS[kind] and kind or "info")
 end)
 
--- 4. Pronto! -------------------------------------------------------------------------------
+-- 4. Personagem ---------------------------------------------------------------------------
+local function refreshCharacterMode()
+	local eliminated = LocalPlayer:GetAttribute("Eliminated") == true
+	if eliminated or EndCutscene.IsPlaying() then
+		FirstPerson.Disable()
+		Movement.Disable()
+	else
+		FirstPerson.Enable()
+		Movement.Enable({ climb = true })
+	end
+end
+LocalPlayer:GetAttributeChangedSignal("Eliminated"):Connect(refreshCharacterMode)
+EndCutscene.Started:Connect(refreshCharacterMode)
+local ok, err = pcall(refreshCharacterMode)
+if not ok then
+	warn("[GameClient] Erro ao ligar a primeira pessoa: " .. tostring(err))
+end
+
+-- 5. Pronto! -------------------------------------------------------------------------------
 Net.event(Net.Names.Game_ClientReady):FireServer()
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="98">
+        <Item class="ModuleScript" referent="108">
           <Properties>
             <string name="Name">HUD</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -29746,8 +32267,13 @@ local function refreshEvents()
 	for _, entry in events do
 		count += 1
 		local info = entry.info
-		local remaining = math.max(math.ceil(info.duration - (now - entry.receivedAt)), 0)
-		entry.label.Text = ("%s\n%s · %ds"):format(info.name, info.regionName or "perto do tabuleiro", remaining)
+		if info.duration < 0 then
+			-- eventos que duram até o fim da partida
+			entry.label.Text = ("%s\n%s · até o fim"):format(info.name, info.regionName or "pelo mapa")
+		else
+			local remaining = math.max(math.ceil(info.duration - (now - entry.receivedAt)), 0)
+			entry.label.Text = ("%s\n%s · %ds"):format(info.name, info.regionName or "perto do tabuleiro", remaining)
+		end
 	end
 	ui.eventsPanel.Visible = count > 0
 end
@@ -29889,7 +32415,7 @@ return HUD
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="99">
+        <Item class="ModuleScript" referent="109">
           <Properties>
             <string name="Name">LoadingScreen</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -30392,7 +32918,7 @@ return LoadingScreen
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="100">
+        <Item class="ModuleScript" referent="110">
           <Properties>
             <string name="Name">RiddleUI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -30648,7 +33174,7 @@ return RiddleUI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="101">
+        <Item class="ModuleScript" referent="111">
           <Properties>
             <string name="Name">Spectate</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -31008,7 +33534,7 @@ return Spectate
 ]]></string>
           </Properties>
         </Item>
-        <Item class="LocalScript" referent="102">
+        <Item class="LocalScript" referent="112">
           <Properties>
             <string name="Name">WeaponClient</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -31632,11 +34158,11 @@ end
 ]]></string>
           </Properties>
         </Item>
-        <Item class="Folder" referent="103">
+        <Item class="Folder" referent="113">
           <Properties>
             <string name="Name">Weapons</string>
           </Properties>
-          <Item class="ModuleScript" referent="104">
+          <Item class="ModuleScript" referent="114">
             <Properties>
               <string name="Name">Aim</string>
               <string name="Source"><![CDATA[--!nonstrict
@@ -31814,7 +34340,7 @@ return Aim
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="105">
+          <Item class="ModuleScript" referent="115">
             <Properties>
               <string name="Name">PickupFx</string>
               <string name="Source"><![CDATA[--!nonstrict
@@ -31941,7 +34467,7 @@ return PickupFx
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="106">
+          <Item class="ModuleScript" referent="116">
             <Properties>
               <string name="Name">WeaponFx</string>
               <string name="Source"><![CDATA[--!nonstrict
@@ -32363,7 +34889,7 @@ return WeaponFx
 ]]></string>
             </Properties>
           </Item>
-          <Item class="ModuleScript" referent="107">
+          <Item class="ModuleScript" referent="117">
             <Properties>
               <string name="Name">WeaponUI</string>
               <string name="Source"><![CDATA[--!nonstrict
@@ -32663,11 +35189,11 @@ return WeaponUI
           </Item>
         </Item>
       </Item>
-      <Item class="Folder" referent="108">
+      <Item class="Folder" referent="118">
         <Properties>
           <string name="Name">Lobby</string>
         </Properties>
-        <Item class="ModuleScript" referent="109">
+        <Item class="ModuleScript" referent="119">
           <Properties>
             <string name="Name">HubUI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -32676,17 +35202,20 @@ return WeaponUI
 --   * "Criar servidor": janela com nome, privacidade (Pública/Só amigos) e máximo de jogadores;
 --   * painel da minha sala: membros, "Iniciar partida" (só o dono), "Convidar amigos" e "Sair da sala";
 --   * "Voltar ao menu" (Hub_Leave + onBack).
--- O painel pode ser escondido para andar pelo hub. Atualiza com Party_Update e Party_GetList (ao abrir).
+-- O painel pode ser escondido para andar pelo hub (Q no PC). Com o painel aberto o mouse fica solto (botão
+-- Modal), já que no hub a câmera é em primeira pessoa. Atualiza com Party_Update e Party_GetList (ao abrir).
 -- Os avisos de teleporte (Menu_TeleportStatus) são tratados pelo TeleportOverlay, igual ao menu.
 --
 --   HubUI.Open(onBack: () -> ())
 --   HubUI.Close()
 --   HubUI.IsOpen(): boolean
 
+local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SocialService = game:GetService("SocialService")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
@@ -32704,6 +35233,7 @@ local HEADER_HEIGHT = 44
 local FOOTER_HEIGHT = 46
 local ACTION_COOLDOWN = 0.6 -- o servidor aceita 1 pedido a cada 0,5 s por remote
 local START_BUTTON_LOCK = 3
+local TOGGLE_ACTION = "SelvaPainelSalas"
 
 local isOpen = false
 local collapsed = false
@@ -33174,6 +35704,15 @@ local function setCollapsed(value: boolean, instant: boolean?)
 		}):Play()
 	end
 	ui.showButton.Visible = value
+	-- Painel aberto: o botão Modal solta o mouse (em primeira pessoa ele fica preso no centro da tela).
+	ui.mouseUnlock.Visible = not value
+end
+
+local function onTogglePanel(_name: string, inputState: Enum.UserInputState)
+	if inputState == Enum.UserInputState.Begin and isOpen and ui then
+		setCollapsed(not collapsed)
+	end
+	return Enum.ContextActionResult.Sink
 end
 
 local function build()
@@ -33190,11 +35729,19 @@ local function build()
 	})
 
 	ui = { gui = gui, panel = panel, top = 64 }
+	ui.mouseUnlock = UIKit.Create("TextButton", {
+		Name = "SoltaMouse",
+		Text = "",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(0, 0),
+		Modal = true,
+		Parent = gui,
+	})
 
 	-- botão para mostrar o painel quando escondido
 	local showButton = UIKit.Button({
 		Name = "MostrarSalas",
-		Text = "Salas",
+		Text = if UserInputService.KeyboardEnabled then "Salas [Q]" else "Salas",
 		Style = "primary",
 		AnchorPoint = Vector2.new(1, 0),
 		Position = UDim2.new(1, -16, 0, 64),
@@ -33453,12 +36000,14 @@ function HubUI.Open(onBack: () -> ())
 	ui.gui.Enabled = true
 	isOpen = true
 	setCollapsed(false, true)
+	ContextActionService:BindAction(TOGGLE_ACTION, onTogglePanel, false, Enum.KeyCode.Q, Enum.KeyCode.ButtonSelect)
 	render()
 	requestList()
 end
 
 function HubUI.Close()
 	isOpen = false
+	ContextActionService:UnbindAction(TOGGLE_ACTION)
 	closeModal()
 	if ui then
 		ui.gui.Enabled = false
@@ -33487,7 +36036,222 @@ return HubUI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="110">
+        <Item class="ModuleScript" referent="120">
+          <Properties>
+            <string name="Name">LeaderboardUI</string>
+            <string name="Source"><![CDATA[--!nonstrict
+-- Painel "Placar" do menu: os melhores jogadores somando todas as partidas (dados do LeaderboardService).
+--
+--   LeaderboardUI.Open(onClose: () -> ())
+--   LeaderboardUI.Close()
+--   LeaderboardUI.IsOpen(): boolean
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local Net = require(ReplicatedStorage.Shared.Net)
+local UIKit = require(ReplicatedStorage.Shared.UI.UIKit)
+
+local LobbyUIUtil = require(script.Parent.LobbyUIUtil)
+
+local LeaderboardUI = {}
+
+local Theme = UIKit.Theme
+local LocalPlayer = Players.LocalPlayer
+
+local ui = nil
+local isOpen = false
+local onCloseCallback: (() -> ())? = nil
+local latest = nil
+local listening = false
+
+local function render()
+	if not ui then
+		return
+	end
+	for _, child in ui.list:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	local payload = latest
+	if not payload then
+		ui.status.Text = "Carregando o placar…"
+		return
+	end
+	local entries = if type(payload.entries) == "table" then payload.entries else {}
+	if payload.available == false and #entries == 0 then
+		ui.status.Text = "O placar não está disponível agora. Tente de novo mais tarde."
+	elseif #entries == 0 then
+		ui.status.Text = "Ninguém pontuou ainda. Vença o tabuleiro e seja o primeiro!"
+	else
+		ui.status.Text = "Pontos: 10 por bicho abatido, 15 por jogada no tabuleiro e 50 por vitória."
+	end
+	for index, entry in entries do
+		if type(entry) == "table" then
+			local mine = entry.userId == LocalPlayer.UserId
+			local row = UIKit.Create("Frame", {
+				Name = "Linha" .. index,
+				BackgroundColor3 = if mine then Theme.GoldDark else Theme.PanelLight,
+				BackgroundTransparency = if mine then 0.2 else 0.35,
+				BorderSizePixel = 0,
+				Size = UDim2.new(1, -8, 0, 40),
+				LayoutOrder = index,
+				Parent = ui.list,
+			})
+			UIKit.Corner(row, UDim.new(0, 8))
+			UIKit.Label({
+				Text = ("%d."):format(index),
+				Font = Theme.BoldFont,
+				TextSize = 20,
+				TextColor3 = if index == 1 then Theme.Gold else Theme.Text,
+				TextXAlignment = Enum.TextXAlignment.Right,
+				Position = UDim2.fromOffset(0, 8),
+				Size = UDim2.fromOffset(36, 24),
+				Parent = row,
+			})
+			UIKit.Label({
+				Text = tostring(entry.name or "?"),
+				Font = Theme.BoldFont,
+				TextSize = 20,
+				TextWrapped = false,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Position = UDim2.fromOffset(46, 8),
+				Size = UDim2.new(0.5, -46, 0, 24),
+				Parent = row,
+			})
+			local details = ("%d pts"):format(tonumber(entry.points) or 0)
+			if type(entry.kills) == "number" then
+				details ..= (" · %d bichos"):format(entry.kills)
+			end
+			if type(entry.wins) == "number" then
+				details ..= (" · %d vitórias"):format(entry.wins)
+			end
+			UIKit.Label({
+				Text = details,
+				TextSize = 17,
+				TextColor3 = Theme.TextMuted,
+				TextWrapped = false,
+				TextXAlignment = Enum.TextXAlignment.Right,
+				Position = UDim2.new(0.5, 0, 0, 9),
+				Size = UDim2.new(0.5, -12, 0, 22),
+				Parent = row,
+			})
+		end
+	end
+end
+
+local function build()
+	local gui = UIKit.ScreenGui("PlacarGlobal", 30)
+	LobbyUIUtil.UseSafeInsets(gui)
+	LobbyUIUtil.Blocker(gui, 0.45)
+	local panel = UIKit.Panel({
+		Name = "Painel",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(560, 560),
+		Parent = gui,
+	})
+	LobbyUIUtil.AutoScale(panel, 1100, 680, 0.6, 1.25)
+	UIKit.Title("Placar Global", {
+		TextSize = 38,
+		Size = UDim2.new(1, 0, 0, 44),
+		Parent = panel,
+	})
+	local status = UIKit.Label({
+		Name = "Status",
+		TextSize = 16,
+		TextColor3 = Theme.TextMuted,
+		TextXAlignment = Enum.TextXAlignment.Center,
+		Position = UDim2.fromOffset(0, 48),
+		Size = UDim2.new(1, 0, 0, 40),
+		Parent = panel,
+	})
+	local list = UIKit.List({
+		Name = "Lista",
+		Position = UDim2.fromOffset(0, 94),
+		Size = UDim2.new(1, 0, 1, -158),
+		Spacing = 6,
+		Parent = panel,
+	})
+	UIKit.Button({
+		Name = "Voltar",
+		Text = "Voltar",
+		Style = "primary",
+		AnchorPoint = Vector2.new(0.5, 1),
+		Position = UDim2.new(0.5, 0, 1, 0),
+		Size = UDim2.new(0.5, 0, 0, 48),
+		OnClick = function()
+			LeaderboardUI.Close()
+		end,
+		Parent = panel,
+	})
+	ui = { gui = gui, status = status, list = list }
+end
+
+local function listen()
+	if listening then
+		return
+	end
+	listening = true
+	Net.event(Net.Names.Leaderboard_Update).OnClientEvent:Connect(function(payload)
+		if type(payload) == "table" then
+			latest = payload
+			if isOpen then
+				render()
+			end
+		end
+	end)
+end
+
+function LeaderboardUI.Open(onClose: () -> ())
+	onCloseCallback = onClose
+	listen()
+	if not ui or not ui.gui.Parent then
+		build()
+	end
+	ui.gui.Enabled = true
+	isOpen = true
+	render()
+	task.spawn(function()
+		local ok, payload = pcall(function()
+			return Net.func(Net.Names.Leaderboard_Get):InvokeServer()
+		end)
+		if ok and type(payload) == "table" then
+			latest = payload
+		elseif not latest then
+			latest = { available = false, entries = {} }
+		end
+		if isOpen then
+			render()
+		end
+	end)
+end
+
+function LeaderboardUI.Close()
+	if not isOpen then
+		return
+	end
+	isOpen = false
+	if ui then
+		ui.gui.Enabled = false
+	end
+	local callback = onCloseCallback
+	onCloseCallback = nil
+	if callback then
+		task.spawn(callback)
+	end
+end
+
+function LeaderboardUI.IsOpen(): boolean
+	return isOpen
+end
+
+return LeaderboardUI
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="121">
           <Properties>
             <string name="Name">LobbyAmbience</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -33592,7 +36356,7 @@ return LobbyAmbience
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="111">
+        <Item class="ModuleScript" referent="122">
           <Properties>
             <string name="Name">LobbyControls</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -33666,7 +36430,7 @@ return LobbyControls
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="112">
+        <Item class="ModuleScript" referent="123">
           <Properties>
             <string name="Name">LobbyUIUtil</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -33997,16 +36761,18 @@ return LobbyUIUtil
 ]]></string>
           </Properties>
         </Item>
-        <Item class="LocalScript" referent="113">
+        <Item class="LocalScript" referent="124">
           <Properties>
             <string name="Name">MainMenu</string>
             <string name="Source"><![CDATA[--!nonstrict
 -- Entrada do cliente do LOBBY: menu principal.
 --   * configurações do jogador (SettingsClient) em segundo plano;
 --   * câmera cinematográfica no sótão (MenuCamera), velas tremulando (LobbyAmbience) e música do menu;
---   * botões "Jogar Solo", "Multiplayer" (hub com salas) e "Configurações" (SettingsUI);
+--   * botões "Jogar Solo", "Multiplayer" (hub com salas), "Placar" (melhores de todos) e "Configurações";
+--   * o boneco do jogador (cópia local do personagem R6) aparece no sótão e na sala de gráficos;
 --   * avisos do servidor (Notify) e status de teleporte (TeleportOverlay).
--- No menu o personagem fica escondido num cubículo atrás da câmera, com os controles desligados.
+-- No menu o personagem de verdade fica num cubículo atrás da câmera, com os controles desligados.
+-- No hub a câmera é em primeira pessoa, com corrida.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -34023,11 +36789,17 @@ local Net = require(ReplicatedStorage.Shared.Net)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 local UIKit = require(ReplicatedStorage.Shared.UI.UIKit)
 
+local FirstPerson = require(Shared:WaitForChild("Character"):WaitForChild("FirstPerson"))
+local Movement = require(Shared.Character:WaitForChild("Movement"))
+local R6Animator = require(Shared.Character:WaitForChild("R6Animator"))
+
 local HubUI = require(script.Parent.HubUI)
+local LeaderboardUI = require(script.Parent.LeaderboardUI)
 local LobbyAmbience = require(script.Parent.LobbyAmbience)
 local LobbyControls = require(script.Parent.LobbyControls)
 local LobbyUIUtil = require(script.Parent.LobbyUIUtil)
 local MenuCamera = require(script.Parent.MenuCamera)
+local MenuPuppet = require(script.Parent.MenuPuppet)
 local TeleportOverlay = require(script.Parent.TeleportOverlay)
 
 local player = Players.LocalPlayer
@@ -34039,7 +36811,7 @@ local MUSIC_VOLUME = 0.5
 local TOAST_KINDS = { info = true, warning = true, danger = true, success = true }
 local SCENE_WAIT = 10 -- segundos esperando o cenário do menu chegar do servidor
 
-local state = "loading" -- "loading" | "menu" | "busy" | "hub" | "settings"
+local state: string = "loading" -- "loading" | "menu" | "busy" | "hub" | "settings" | "leaderboard"
 local music: Sound? = nil
 
 -- Configurações (áudio e gráficos) -------------------------------------------------------------------
@@ -34107,12 +36879,12 @@ local menu = UIKit.Create("CanvasGroup", {
 	BorderSizePixel = 0,
 	AnchorPoint = Vector2.new(0, 0.5),
 	Position = UDim2.new(0, 56, 0.5, 0),
-	Size = UDim2.fromOffset(440, 470),
+	Size = UDim2.fromOffset(440, 500),
 	GroupTransparency = 1,
 	Visible = false,
 	Parent = gui,
 }) :: CanvasGroup
-LobbyUIUtil.AutoScale(menu, 1100, 640, 0.7, 1.35)
+LobbyUIUtil.AutoScale(menu, 1100, 640, 0.6, 1.35)
 -- folga para as bordas dos botões não serem cortadas pelo CanvasGroup
 UIKit.Create("UIPadding", {
 	PaddingLeft = UDim.new(0, 4),
@@ -34187,7 +36959,7 @@ local buttons = UIKit.Frame({
 	LayoutOrder = 5,
 	Parent = menu,
 })
-UIKit.ListLayout(buttons, 12)
+UIKit.ListLayout(buttons, 10)
 
 local function menuButton(
 	order: number,
@@ -34201,7 +36973,7 @@ local function menuButton(
 		Name = text,
 		Text = "",
 		Style = style,
-		Size = UDim2.new(1, 0, 0, 68),
+		Size = UDim2.new(1, 0, 0, 60),
 		LayoutOrder = order,
 		OnClick = onClick,
 		Parent = buttons,
@@ -34221,7 +36993,7 @@ local function menuButton(
 		TextColor3 = color,
 		TextWrapped = false,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		Position = UDim2.fromOffset(68, 9),
+		Position = UDim2.fromOffset(68, 6),
 		Size = UDim2.new(1, -84, 0, 28),
 		Parent = button,
 	})
@@ -34232,7 +37004,7 @@ local function menuButton(
 		TextTransparency = 0.25,
 		TextWrapped = false,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		Position = UDim2.fromOffset(68, 38),
+		Position = UDim2.fromOffset(68, 34),
 		Size = UDim2.new(1, -84, 0, 20),
 		Parent = button,
 	})
@@ -34354,6 +37126,9 @@ local function enterHub()
 	waitForCharacterNear(GameConfig.HUB_ORIGIN, 90, 3)
 	MenuCamera.Stop()
 	LobbyControls.SetEnabled(true)
+	-- No hub: primeira pessoa e corrida (sem escalada: as paredes do templo não têm teto).
+	FirstPerson.Enable()
+	Movement.Enable({ climb = false })
 	state = "hub"
 	HubUI.Open(function()
 		backToMenu()
@@ -34367,6 +37142,8 @@ backToMenu = function()
 	end
 	state = "busy"
 	setCurtain(true, 0.35)
+	FirstPerson.Disable()
+	Movement.Disable()
 	LobbyControls.SetEnabled(false)
 	MenuCamera.Start(true)
 	waitForCharacterNear(GameConfig.MENU_AREA_ORIGIN + Vector3.new(0, 0, 30), 40, 1.5)
@@ -34416,9 +37193,29 @@ local function openSettings()
 	end
 end
 
+local function openLeaderboard()
+	if state ~= "menu" or TeleportOverlay.IsVisible() then
+		return
+	end
+	state = "leaderboard"
+	setMenuVisible(false)
+	local ok, err = pcall(LeaderboardUI.Open, function()
+		if (state :: string) == "leaderboard" then
+			setMenuVisible(true)
+			state = "menu"
+		end
+	end)
+	if not ok then
+		warn("[MainMenu] Erro ao abrir o placar: " .. tostring(err))
+		setMenuVisible(true)
+		state = "menu"
+	end
+end
+
 menuButton(1, "primary", "Jogar Solo", "Enfrente a selva sozinho", LobbyUIUtil.DiceIcon, playSolo)
 menuButton(2, "secondary", "Multiplayer", "Crie uma sala ou entre na de alguém", LobbyUIUtil.PeopleIcon, enterHub)
-menuButton(3, "ghost", "Configurações", "Áudio e gráficos", LobbyUIUtil.GearIcon, openSettings)
+menuButton(3, "ghost", "Placar", "Os melhores jogadores de todos", LobbyUIUtil.GlobeIcon, openLeaderboard)
+menuButton(4, "ghost", "Configurações", "Áudio e gráficos", LobbyUIUtil.GearIcon, openSettings)
 
 -- Rede ---------------------------------------------------------------------------------------------------------
 
@@ -34445,6 +37242,9 @@ end)
 LobbyControls.SetEnabled(false)
 MenuCamera.Start(false)
 LobbyAmbience.Start()
+-- Personagens R6 animados (inclusive o boneco do próprio jogador no sótão e na sala de gráficos).
+R6Animator.Init()
+MenuPuppet.Start()
 
 task.spawn(function()
 	MenuCamera.WaitForMarker(SCENE_WAIT)
@@ -34462,7 +37262,7 @@ end)
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="114">
+        <Item class="ModuleScript" referent="125">
           <Properties>
             <string name="Name">MenuCamera</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -34650,7 +37450,150 @@ return MenuCamera
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="115">
+        <Item class="ModuleScript" referent="126">
+          <Properties>
+            <string name="Name">MenuPuppet</string>
+            <string name="Source"><![CDATA[--!nonstrict
+-- "Boneco" do jogador nas cenas do lobby (só no cliente dele): uma cópia do próprio personagem R6 fica em pé
+-- no sótão do menu (marcador LobbyMarkers.MenuCharacter) e na sala de demonstração dos gráficos
+-- (LobbyMarkers.DemoCharacter), animada pelo R6Animator. Cada jogador vê apenas o próprio boneco; o
+-- personagem de verdade continua no cubículo atrás da câmera enquanto o menu está aberto.
+--
+--   MenuPuppet.Start()   -- idempotente; refaz os bonecos quando o personagem muda (roupa, respawn)
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local R6Animator = require(ReplicatedStorage.Shared.Character.R6Animator)
+
+local MenuPuppet = {}
+
+local MARKERS = { "MenuCharacter", "DemoCharacter" }
+local APPEARANCE_WAIT = 1.2 -- acessórios e roupas chegam logo depois do modelo
+
+local LocalPlayer = Players.LocalPlayer
+
+local started = false
+local puppets: { Model } = {}
+local buildToken = 0
+
+local function clearPuppets()
+	for _, puppet in puppets do
+		puppet:Destroy()
+	end
+	table.clear(puppets)
+end
+
+local function markerCFrame(name: string): CFrame?
+	local markers = workspace:FindFirstChild("LobbyMarkers")
+	if not markers then
+		return nil
+	end
+	local part = markers:FindFirstChild(name)
+	if part and part:IsA("BasePart") then
+		return part.CFrame
+	end
+	local attribute = markers:GetAttribute(name .. "CFrame")
+	return if typeof(attribute) == "CFrame" then attribute else nil
+end
+
+local function makeCopy(character: Model): Model?
+	local wasArchivable = character.Archivable
+	character.Archivable = true
+	local ok, copy = pcall(function()
+		return character:Clone()
+	end)
+	character.Archivable = wasArchivable
+	if not ok or not copy then
+		return nil
+	end
+	for _, descendant in copy:GetDescendants() do
+		if descendant:IsA("Script") or descendant:IsA("LocalScript") or descendant:IsA("Tool") then
+			descendant:Destroy()
+		elseif descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.CanQuery = false
+		end
+	end
+	local humanoid = copy:FindFirstChildOfClass("Humanoid")
+	local root = copy:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not root or not root:IsA("BasePart") then
+		copy:Destroy()
+		return nil
+	end
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+	humanoid.BreakJointsOnDeath = false
+	root.Anchored = true
+	copy.Name = "BonecoDoJogador"
+	return copy
+end
+
+-- Altura da HumanoidRootPart acima da sola dos pés.
+local function rootHeight(model: Model): number
+	local root = model:FindFirstChild("HumanoidRootPart") :: BasePart
+	local leg = model:FindFirstChild("Left Leg") or model:FindFirstChild("Right Leg")
+	if leg and leg:IsA("BasePart") then
+		return root.Position.Y - (leg.Position.Y - leg.Size.Y / 2)
+	end
+	return 3
+end
+
+local function build(character: Model)
+	buildToken += 1
+	local token = buildToken
+	clearPuppets()
+	character:WaitForChild("Torso", 10)
+	character:WaitForChild("HumanoidRootPart", 10)
+	task.wait(APPEARANCE_WAIT)
+	if token ~= buildToken or LocalPlayer.Character ~= character or not character.Parent then
+		return
+	end
+	for _, markerName in MARKERS do
+		local spot = markerCFrame(markerName)
+		local deadline = os.clock() + 15
+		while not spot and os.clock() < deadline do
+			task.wait(0.5)
+			spot = markerCFrame(markerName)
+		end
+		if token ~= buildToken then
+			return
+		end
+		if spot then
+			local copy = makeCopy(character)
+			if copy then
+				local height = rootHeight(copy)
+				copy:PivotTo(CFrame.new(spot.Position + Vector3.new(0, height, 0)) * spot.Rotation)
+				copy.Parent = workspace
+				table.insert(puppets, copy)
+				R6Animator.Register(copy, { pose = "menu" })
+			end
+		else
+			warn(("[MenuPuppet] Marcador %s não encontrado; o boneco não vai aparecer."):format(markerName))
+		end
+	end
+end
+
+function MenuPuppet.Start()
+	if started then
+		return
+	end
+	started = true
+	LocalPlayer.CharacterAdded:Connect(function(character)
+		task.spawn(build, character)
+	end)
+	if LocalPlayer.Character then
+		task.spawn(build, LocalPlayer.Character)
+	end
+end
+
+return MenuPuppet
+]]></string>
+          </Properties>
+        </Item>
+        <Item class="ModuleScript" referent="127">
           <Properties>
             <string name="Name">SettingsUI</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -34659,9 +37602,10 @@ return MenuCamera
 --   SettingsUI.Close()         fecha, devolve a câmera ao CFrame/CameraType de antes e chama onClose
 --
 -- Aba Áudio: painel no centro; sliders aplicam o volume ao vivo (soltar "Efeitos" toca um clique de exemplo).
--- Aba Gráficos: a câmera voa até workspace.LobbyMarkers.DemoCamera (sala de demonstração) e o painel vai para
--- a lateral direita (~38% da largura, fundo translúcido). Cada mudança passa por SettingsClient.Set →
--- GraphicsApplier, então a sala muda NA HORA. Ao voltar para Áudio ou fechar, a câmera volta ao que era.
+-- Aba Gráficos: a tela escurece, a câmera passa para workspace.LobbyMarkers.DemoCamera (sala de demonstração,
+-- com o boneco do jogador) e a tela clareia; o painel vai para a lateral direita (~38% da largura, fundo
+-- translúcido). Cada mudança passa por SettingsClient.Set → GraphicsApplier, então a sala muda NA HORA.
+-- Ao voltar para Áudio ou fechar, a mesma transição preta devolve a câmera ao que era.
 -- A interface é construída uma vez e reaproveitada nas próximas aberturas.
 
 local Players = game:GetService("Players")
@@ -34684,10 +37628,12 @@ local GUI_NAME = "Configuracoes"
 local DISPLAY_ORDER = 40
 local CAMERA_BIND = "SettingsDemoCamera"
 local CAMERA_PRIORITY = Enum.RenderPriority.Last.Value -- depois de qualquer outra câmera
-local FLY_TIME = 1.4
 local RETURN_TIME = 0.9
 local CLOSE_RETURN_TIME = 0.6
 local DEMO_FOV = 70
+local FADE_IN = 0.35 -- tela preta da transição para a sala de gráficos (e de volta)
+local FADE_HOLD = 0.15
+local FADE_OUT = 0.45
 local DEMO_WAIT = 3 -- s esperando o marcador DemoCamera aparecer
 local LAYOUT_TWEEN = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local MARKER_DISTANCES = { 100, 200, 400, 800, 1500 } -- placas da pista da sala de demonstração
@@ -34830,6 +37776,58 @@ local function startCameraAnimation(target: CFrame, duration: number, toFov: num
 		cameraBound = true
 		RunService:BindToRenderStep(CAMERA_BIND, CAMERA_PRIORITY, onRenderStep)
 	end
+end
+
+-- Tela preta da transição (fica atrás do painel de configurações, que continua visível).
+local fadeFrame: Frame? = nil
+local fadeToken = 0
+
+local function ensureFade(): Frame
+	if fadeFrame and fadeFrame.Parent and fadeFrame.Parent.Parent then
+		return fadeFrame
+	end
+	local gui = UIKit.ScreenGui("TransicaoGraficos", DISPLAY_ORDER - 1)
+	fadeFrame = UIKit.Create("Frame", {
+		Name = "Preto",
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		Visible = false,
+		Parent = gui,
+	}) :: Frame
+	return fadeFrame :: Frame
+end
+
+-- Escurece, executa `midAction` com a tela preta (troca a câmera) e clareia. onDone roda ao clarear.
+local function fadeCut(midAction: () -> (), onDone: (() -> ())?)
+	fadeToken += 1
+	local token = fadeToken
+	local frame = ensureFade()
+	frame.Visible = true
+	TweenService:Create(frame, TweenInfo.new(FADE_IN, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+		BackgroundTransparency = 0,
+	}):Play()
+	task.delay(FADE_IN, function()
+		local ok, err = pcall(midAction)
+		if not ok then
+			warn("[SettingsUI] Erro na transição da câmera: " .. tostring(err))
+		end
+		task.wait(FADE_HOLD)
+		if token == fadeToken then
+			TweenService:Create(frame, TweenInfo.new(FADE_OUT, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+				BackgroundTransparency = 1,
+			}):Play()
+			task.delay(FADE_OUT, function()
+				if token == fadeToken then
+					frame.Visible = false
+				end
+			end)
+		end
+		if onDone then
+			onDone()
+		end
+	end)
 end
 
 local function restoreSavedCamera(saved)
@@ -35142,7 +38140,7 @@ local function renderTabs(tab: string)
 end
 
 -- Câmera volta ao que era quando a tela abriu.
-local function returnCamera(current, duration: number, onDone)
+local function returnCamera(current, _duration: number, onDone)
 	current.cameraToken += 1
 	if not current.cameraAway then
 		stopCameraAnimation()
@@ -35152,13 +38150,15 @@ local function returnCamera(current, duration: number, onDone)
 		return
 	end
 	local saved = current.saved
-	startCameraAnimation(saved.cframe, duration, saved.fov, false, function()
+	local token = current.cameraToken
+	fadeCut(function()
+		if current.cameraToken ~= token then
+			return -- outra troca de aba começou durante o escurecer
+		end
+		stopCameraAnimation()
 		restoreSavedCamera(saved)
 		current.cameraAway = false
-		if onDone then
-			onDone()
-		end
-	end)
+	end, onDone)
 end
 
 local function enterDemoCamera(current)
@@ -35178,7 +38178,13 @@ local function enterDemoCamera(current)
 		ui.demoMissing.Visible = false
 		requestStreamingAround(target.Position)
 		current.cameraAway = true
-		startCameraAnimation(target, FLY_TIME, DEMO_FOV, true, nil)
+		fadeCut(function()
+			if session ~= current or current.closing or current.tab ~= "graphics" or current.cameraToken ~= token then
+				return
+			end
+			-- duração 0: corte seco escondido pela tela preta; "hold" mantém a câmera na sala
+			startCameraAnimation(target, 0, DEMO_FOV, true, nil)
+		end)
 	end)
 end
 
@@ -35604,7 +38610,7 @@ return SettingsUI
 ]]></string>
           </Properties>
         </Item>
-        <Item class="ModuleScript" referent="116">
+        <Item class="ModuleScript" referent="128">
           <Properties>
             <string name="Name">TeleportOverlay</string>
             <string name="Source"><![CDATA[--!nonstrict
@@ -35881,13 +38887,13 @@ return TeleportOverlay
       </Item>
     </Item>
   </Item>
-  <Item class="TextChatService" referent="117">
+  <Item class="TextChatService" referent="129">
     <Properties>
       <string name="Name">TextChatService</string>
       <token name="ChatVersion">1</token>
     </Properties>
   </Item>
-  <Item class="Workspace" referent="118">
+  <Item class="Workspace" referent="130">
     <Properties>
       <string name="Name">Workspace</string>
       <bool name="NeedsPivotMigration">false</bool>

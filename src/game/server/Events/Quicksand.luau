@@ -49,6 +49,12 @@ return {
 	MinSpace = 2,
 	Duration = 60,
 	Radius = 40,
+	Sites = 3, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram areia (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.Sand,
+		Colors = { Color3.fromRGB(196, 162, 106), Color3.fromRGB(181, 146, 94), Color3.fromRGB(208, 178, 122) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()

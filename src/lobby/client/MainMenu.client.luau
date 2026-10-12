@@ -2,9 +2,11 @@
 -- Entrada do cliente do LOBBY: menu principal.
 --   * configurações do jogador (SettingsClient) em segundo plano;
 --   * câmera cinematográfica no sótão (MenuCamera), velas tremulando (LobbyAmbience) e música do menu;
---   * botões "Jogar Solo", "Multiplayer" (hub com salas) e "Configurações" (SettingsUI);
+--   * botões "Jogar Solo", "Multiplayer" (hub com salas), "Placar" (melhores de todos) e "Configurações";
+--   * o boneco do jogador (cópia local do personagem R6) aparece no sótão e na sala de gráficos;
 --   * avisos do servidor (Notify) e status de teleporte (TeleportOverlay).
--- No menu o personagem fica escondido num cubículo atrás da câmera, com os controles desligados.
+-- No menu o personagem de verdade fica num cubículo atrás da câmera, com os controles desligados.
+-- No hub a câmera é em primeira pessoa, com corrida.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -21,11 +23,17 @@ local Net = require(ReplicatedStorage.Shared.Net)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 local UIKit = require(ReplicatedStorage.Shared.UI.UIKit)
 
+local FirstPerson = require(Shared:WaitForChild("Character"):WaitForChild("FirstPerson"))
+local Movement = require(Shared.Character:WaitForChild("Movement"))
+local R6Animator = require(Shared.Character:WaitForChild("R6Animator"))
+
 local HubUI = require(script.Parent.HubUI)
+local LeaderboardUI = require(script.Parent.LeaderboardUI)
 local LobbyAmbience = require(script.Parent.LobbyAmbience)
 local LobbyControls = require(script.Parent.LobbyControls)
 local LobbyUIUtil = require(script.Parent.LobbyUIUtil)
 local MenuCamera = require(script.Parent.MenuCamera)
+local MenuPuppet = require(script.Parent.MenuPuppet)
 local TeleportOverlay = require(script.Parent.TeleportOverlay)
 
 local player = Players.LocalPlayer
@@ -37,7 +45,7 @@ local MUSIC_VOLUME = 0.5
 local TOAST_KINDS = { info = true, warning = true, danger = true, success = true }
 local SCENE_WAIT = 10 -- segundos esperando o cenário do menu chegar do servidor
 
-local state = "loading" -- "loading" | "menu" | "busy" | "hub" | "settings"
+local state: string = "loading" -- "loading" | "menu" | "busy" | "hub" | "settings" | "leaderboard"
 local music: Sound? = nil
 
 -- Configurações (áudio e gráficos) -------------------------------------------------------------------
@@ -105,12 +113,12 @@ local menu = UIKit.Create("CanvasGroup", {
 	BorderSizePixel = 0,
 	AnchorPoint = Vector2.new(0, 0.5),
 	Position = UDim2.new(0, 56, 0.5, 0),
-	Size = UDim2.fromOffset(440, 470),
+	Size = UDim2.fromOffset(440, 500),
 	GroupTransparency = 1,
 	Visible = false,
 	Parent = gui,
 }) :: CanvasGroup
-LobbyUIUtil.AutoScale(menu, 1100, 640, 0.7, 1.35)
+LobbyUIUtil.AutoScale(menu, 1100, 640, 0.6, 1.35)
 -- folga para as bordas dos botões não serem cortadas pelo CanvasGroup
 UIKit.Create("UIPadding", {
 	PaddingLeft = UDim.new(0, 4),
@@ -185,7 +193,7 @@ local buttons = UIKit.Frame({
 	LayoutOrder = 5,
 	Parent = menu,
 })
-UIKit.ListLayout(buttons, 12)
+UIKit.ListLayout(buttons, 10)
 
 local function menuButton(
 	order: number,
@@ -199,7 +207,7 @@ local function menuButton(
 		Name = text,
 		Text = "",
 		Style = style,
-		Size = UDim2.new(1, 0, 0, 68),
+		Size = UDim2.new(1, 0, 0, 60),
 		LayoutOrder = order,
 		OnClick = onClick,
 		Parent = buttons,
@@ -219,7 +227,7 @@ local function menuButton(
 		TextColor3 = color,
 		TextWrapped = false,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		Position = UDim2.fromOffset(68, 9),
+		Position = UDim2.fromOffset(68, 6),
 		Size = UDim2.new(1, -84, 0, 28),
 		Parent = button,
 	})
@@ -230,7 +238,7 @@ local function menuButton(
 		TextTransparency = 0.25,
 		TextWrapped = false,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		Position = UDim2.fromOffset(68, 38),
+		Position = UDim2.fromOffset(68, 34),
 		Size = UDim2.new(1, -84, 0, 20),
 		Parent = button,
 	})
@@ -352,6 +360,9 @@ local function enterHub()
 	waitForCharacterNear(GameConfig.HUB_ORIGIN, 90, 3)
 	MenuCamera.Stop()
 	LobbyControls.SetEnabled(true)
+	-- No hub: primeira pessoa e corrida (sem escalada: as paredes do templo não têm teto).
+	FirstPerson.Enable()
+	Movement.Enable({ climb = false })
 	state = "hub"
 	HubUI.Open(function()
 		backToMenu()
@@ -365,6 +376,8 @@ backToMenu = function()
 	end
 	state = "busy"
 	setCurtain(true, 0.35)
+	FirstPerson.Disable()
+	Movement.Disable()
 	LobbyControls.SetEnabled(false)
 	MenuCamera.Start(true)
 	waitForCharacterNear(GameConfig.MENU_AREA_ORIGIN + Vector3.new(0, 0, 30), 40, 1.5)
@@ -414,9 +427,29 @@ local function openSettings()
 	end
 end
 
+local function openLeaderboard()
+	if state ~= "menu" or TeleportOverlay.IsVisible() then
+		return
+	end
+	state = "leaderboard"
+	setMenuVisible(false)
+	local ok, err = pcall(LeaderboardUI.Open, function()
+		if (state :: string) == "leaderboard" then
+			setMenuVisible(true)
+			state = "menu"
+		end
+	end)
+	if not ok then
+		warn("[MainMenu] Erro ao abrir o placar: " .. tostring(err))
+		setMenuVisible(true)
+		state = "menu"
+	end
+end
+
 menuButton(1, "primary", "Jogar Solo", "Enfrente a selva sozinho", LobbyUIUtil.DiceIcon, playSolo)
 menuButton(2, "secondary", "Multiplayer", "Crie uma sala ou entre na de alguém", LobbyUIUtil.PeopleIcon, enterHub)
-menuButton(3, "ghost", "Configurações", "Áudio e gráficos", LobbyUIUtil.GearIcon, openSettings)
+menuButton(3, "ghost", "Placar", "Os melhores jogadores de todos", LobbyUIUtil.GlobeIcon, openLeaderboard)
+menuButton(4, "ghost", "Configurações", "Áudio e gráficos", LobbyUIUtil.GearIcon, openSettings)
 
 -- Rede ---------------------------------------------------------------------------------------------------------
 
@@ -443,6 +476,9 @@ end)
 LobbyControls.SetEnabled(false)
 MenuCamera.Start(false)
 LobbyAmbience.Start()
+-- Personagens R6 animados (inclusive o boneco do próprio jogador no sótão e na sala de gráficos).
+R6Animator.Init()
+MenuPuppet.Start()
 
 task.spawn(function()
 	MenuCamera.WaitForMarker(SCENE_WAIT)

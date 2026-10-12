@@ -4,9 +4,10 @@
 --   SettingsUI.Close()         fecha, devolve a câmera ao CFrame/CameraType de antes e chama onClose
 --
 -- Aba Áudio: painel no centro; sliders aplicam o volume ao vivo (soltar "Efeitos" toca um clique de exemplo).
--- Aba Gráficos: a câmera voa até workspace.LobbyMarkers.DemoCamera (sala de demonstração) e o painel vai para
--- a lateral direita (~38% da largura, fundo translúcido). Cada mudança passa por SettingsClient.Set →
--- GraphicsApplier, então a sala muda NA HORA. Ao voltar para Áudio ou fechar, a câmera volta ao que era.
+-- Aba Gráficos: a tela escurece, a câmera passa para workspace.LobbyMarkers.DemoCamera (sala de demonstração,
+-- com o boneco do jogador) e a tela clareia; o painel vai para a lateral direita (~38% da largura, fundo
+-- translúcido). Cada mudança passa por SettingsClient.Set → GraphicsApplier, então a sala muda NA HORA.
+-- Ao voltar para Áudio ou fechar, a mesma transição preta devolve a câmera ao que era.
 -- A interface é construída uma vez e reaproveitada nas próximas aberturas.
 
 local Players = game:GetService("Players")
@@ -29,10 +30,12 @@ local GUI_NAME = "Configuracoes"
 local DISPLAY_ORDER = 40
 local CAMERA_BIND = "SettingsDemoCamera"
 local CAMERA_PRIORITY = Enum.RenderPriority.Last.Value -- depois de qualquer outra câmera
-local FLY_TIME = 1.4
 local RETURN_TIME = 0.9
 local CLOSE_RETURN_TIME = 0.6
 local DEMO_FOV = 70
+local FADE_IN = 0.35 -- tela preta da transição para a sala de gráficos (e de volta)
+local FADE_HOLD = 0.15
+local FADE_OUT = 0.45
 local DEMO_WAIT = 3 -- s esperando o marcador DemoCamera aparecer
 local LAYOUT_TWEEN = TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local MARKER_DISTANCES = { 100, 200, 400, 800, 1500 } -- placas da pista da sala de demonstração
@@ -175,6 +178,58 @@ local function startCameraAnimation(target: CFrame, duration: number, toFov: num
 		cameraBound = true
 		RunService:BindToRenderStep(CAMERA_BIND, CAMERA_PRIORITY, onRenderStep)
 	end
+end
+
+-- Tela preta da transição (fica atrás do painel de configurações, que continua visível).
+local fadeFrame: Frame? = nil
+local fadeToken = 0
+
+local function ensureFade(): Frame
+	if fadeFrame and fadeFrame.Parent and fadeFrame.Parent.Parent then
+		return fadeFrame
+	end
+	local gui = UIKit.ScreenGui("TransicaoGraficos", DISPLAY_ORDER - 1)
+	fadeFrame = UIKit.Create("Frame", {
+		Name = "Preto",
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Size = UDim2.fromScale(1, 1),
+		Visible = false,
+		Parent = gui,
+	}) :: Frame
+	return fadeFrame :: Frame
+end
+
+-- Escurece, executa `midAction` com a tela preta (troca a câmera) e clareia. onDone roda ao clarear.
+local function fadeCut(midAction: () -> (), onDone: (() -> ())?)
+	fadeToken += 1
+	local token = fadeToken
+	local frame = ensureFade()
+	frame.Visible = true
+	TweenService:Create(frame, TweenInfo.new(FADE_IN, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+		BackgroundTransparency = 0,
+	}):Play()
+	task.delay(FADE_IN, function()
+		local ok, err = pcall(midAction)
+		if not ok then
+			warn("[SettingsUI] Erro na transição da câmera: " .. tostring(err))
+		end
+		task.wait(FADE_HOLD)
+		if token == fadeToken then
+			TweenService:Create(frame, TweenInfo.new(FADE_OUT, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {
+				BackgroundTransparency = 1,
+			}):Play()
+			task.delay(FADE_OUT, function()
+				if token == fadeToken then
+					frame.Visible = false
+				end
+			end)
+		end
+		if onDone then
+			onDone()
+		end
+	end)
 end
 
 local function restoreSavedCamera(saved)
@@ -487,7 +542,7 @@ local function renderTabs(tab: string)
 end
 
 -- Câmera volta ao que era quando a tela abriu.
-local function returnCamera(current, duration: number, onDone)
+local function returnCamera(current, _duration: number, onDone)
 	current.cameraToken += 1
 	if not current.cameraAway then
 		stopCameraAnimation()
@@ -497,13 +552,15 @@ local function returnCamera(current, duration: number, onDone)
 		return
 	end
 	local saved = current.saved
-	startCameraAnimation(saved.cframe, duration, saved.fov, false, function()
+	local token = current.cameraToken
+	fadeCut(function()
+		if current.cameraToken ~= token then
+			return -- outra troca de aba começou durante o escurecer
+		end
+		stopCameraAnimation()
 		restoreSavedCamera(saved)
 		current.cameraAway = false
-		if onDone then
-			onDone()
-		end
-	end)
+	end, onDone)
 end
 
 local function enterDemoCamera(current)
@@ -523,7 +580,13 @@ local function enterDemoCamera(current)
 		ui.demoMissing.Visible = false
 		requestStreamingAround(target.Position)
 		current.cameraAway = true
-		startCameraAnimation(target, FLY_TIME, DEMO_FOV, true, nil)
+		fadeCut(function()
+			if session ~= current or current.closing or current.tab ~= "graphics" or current.cameraToken ~= token then
+				return
+			end
+			-- duração 0: corte seco escondido pela tela preta; "hold" mantém a câmera na sala
+			startCameraAnimation(target, 0, DEMO_FOV, true, nil)
+		end)
 	end)
 end
 

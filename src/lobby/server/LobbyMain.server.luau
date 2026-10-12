@@ -1,7 +1,7 @@
 --!nonstrict
 -- Entrada do servidor do LOBBY. Ordem do contrato:
 --   SoundUtil.EnsureGroups → iluminação → LobbyWorld.Build → DemoRoom.Build → SettingsStore.Init →
---   PartyService.Init → TeleportHandler.Init
+--   CharacterService.Init (personagens R6) → PartyService.Init → LeaderboardService.Init → TeleportHandler.Init
 -- Cada etapa roda protegida: um erro numa delas não impede as outras de iniciar.
 -- O place é único: este script só roda nos servidores públicos (ver Shared/PlaceMode).
 
@@ -13,6 +13,12 @@ if require(ReplicatedStorage.Shared.PlaceMode).Get() ~= "lobby" then
 	return -- servidor reservado: quem roda aqui é o GameMain
 end
 
+-- Personagens R6 são criados por código (ServerShared/CharacterService), não pelo spawn padrão do Roblox.
+-- Desligado antes de qualquer espera, para ninguém nascer com o avatar padrão.
+local Players = game:GetService("Players")
+Players.CharacterAutoLoads = false
+
+local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local LobbyWorld = require(script.Parent.LobbyWorld)
@@ -116,5 +122,23 @@ end)
 step("SettingsStore.Init", function()
 	requireModule(ServerScriptService:FindFirstChild("ServerShared"), "SettingsStore").Init()
 end)
+step("CharacterService.Init", function()
+	requireModule(ServerScriptService:FindFirstChild("ServerShared"), "CharacterService").Init({
+		autoSpawn = true,
+		respawnDelay = 3,
+		-- nasce no cubículo do menu (o PartyService leva para o hub se for o caso)
+		spawnCFrame = function(): CFrame?
+			local markers = workspace:FindFirstChild("LobbyMarkers")
+			local spawn = markers and markers:FindFirstChild("MenuSpawn")
+			if spawn and spawn:IsA("BasePart") then
+				return CFrame.new(spawn.Position + Vector3.new(0, 3.5, 0))
+			end
+			return CFrame.new(GameConfig.MENU_AREA_ORIGIN + Vector3.new(0, 3.5, 30))
+		end,
+	})
+end)
 step("PartyService.Init", PartyService.Init)
+step("LeaderboardService.Init", function()
+	requireModule(script.Parent, "LeaderboardService").Init()
+end)
 step("TeleportHandler.Init", TeleportHandler.Init)

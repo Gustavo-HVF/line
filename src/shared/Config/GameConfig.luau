@@ -16,9 +16,10 @@ GameConfig.EVENT_WARNING_TIME = 5 -- tempo entre o enigma e o evento nas jogadas
 GameConfig.ROLL_COOLDOWN = 60 -- segundos entre jogadas do dado
 GameConfig.BOARD_SPACES = 40 -- casas do tabuleiro (a última é a vitória)
 GameConfig.DICE_COUNT = 2
-GameConfig.MAX_ACTIVE_EVENTS = 4 -- eventos simultâneos (somados); o mais antigo termina se passar disso
 GameConfig.EVENT_DEFAULT_RADIUS = 60
-GameConfig.RETURN_TO_LOBBY_DELAY = 15
+GameConfig.MAX_EVENT_SITES = 14 -- focos de eventos ao mesmo tempo no mapa todo (os eventos duram até o fim)
+GameConfig.PHYSICAL_EVENT_SITES = 3 -- cada evento físico acontece em vários pontos do mapa ao mesmo tempo
+GameConfig.RETURN_TO_LOBBY_DELAY = 24 -- inclui a cutscene final e a tela de resultados
 GameConfig.PLAYER_MAX_HEALTH = 100
 
 -- Ilha / mapa ---------------------------------------------------------------

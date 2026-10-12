@@ -1054,6 +1054,26 @@ function DemoRoom.Build(): Model
 	})
 	markers:SetAttribute("DemoCameraCFrame", cameraCFrame)
 
+	-- Boneco do jogador na sala (cópia local do personagem, ver MenuPuppet): no tapete, virado de lado
+	-- para a câmera. O CFrame marca o chão sob os pés.
+	local previousCharacter = markers:FindFirstChild("DemoCharacter")
+	if previousCharacter then
+		previousCharacter:Destroy()
+	end
+	local characterCFrame = CFrame.lookAt(at(-5, 0, -4), at(4, 0, -16))
+	PartBuilder.part({
+		Name = "DemoCharacter",
+		Size = Vector3.one,
+		CFrame = characterCFrame,
+		Transparency = 1,
+		CanCollide = false,
+		CanQuery = false,
+		CanTouch = false,
+		CastShadow = false,
+		Parent = markers,
+	})
+	markers:SetAttribute("DemoCharacterCFrame", characterCFrame)
+
 	return root
 end
 

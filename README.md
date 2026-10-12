@@ -12,8 +12,19 @@ O jogo usa **um único place**. Servidores públicos rodam o **lobby**; quando a
 reserva um servidor do mesmo place (`TeleportService:ReserveServer`) e teleporta o grupo para lá. Servidor
 reservado roda a **partida** (`src/shared/PlaceMode.luau` decide isso quando o servidor liga).
 
+**Personagem (lobby e partida)**
+- Avatares **R6** com a aparência de cada jogador (montados por código, não importa o tipo de avatar da experiência).
+- Animação **procedural** feita no próprio jogo: parado, andando, correndo, pulando, caindo, escalando e segurando arma.
+- **Primeira pessoa** no hub e na partida: o corpo continua visível (braços, pernas, arma) e a câmera balança com os
+  passos (mais forte correndo) e afunda ao cair de altura.
+- **Correr** com barra de **estamina** (logo abaixo da mira). **Escalar** paredes na partida: olhe para a parede e
+  segure Pular; gasta estamina e, no topo, dá um impulso para subir na borda.
+
 **Lobby (servidores públicos)**
-- Menu principal com **Jogar Solo**, **Multiplayer** e **Configurações**, sobre um cenário de sótão com o tabuleiro.
+- Menu principal com **Jogar Solo**, **Multiplayer**, **Placar** e **Configurações**, sobre um cenário de sótão com o
+  tabuleiro. O **seu personagem aparece na cena**, em pé atrás da mesa (cada jogador vê o próprio).
+- **Placar global:** os melhores jogadores somando todas as partidas (painel no menu e quadro de pedra no hub).
+  Pontos: 10 por bicho abatido, 15 por jogada no tabuleiro e 50 por vitória.
 - **Multiplayer:** leva ao hub (salão de templo na selva). Lá você pode **Criar servidor** escolhendo:
   - nome da sala;
   - privacidade: **Pública** (qualquer pessoa do servidor vê e entra) ou **Só amigos**;
@@ -21,7 +32,8 @@ reservado roda a **partida** (`src/shared/PlaceMode.luau` decide isso quando o s
   O dono inicia a partida e o grupo inteiro é teleportado junto.
 - **Configurações:**
   - **Áudio:** volume geral, música, efeitos e ambiente.
-  - **Gráficos:** a câmera vai para uma **sala de demonstração** e cada opção muda a sala na hora:
+  - **Gráficos:** uma **tela preta** de transição leva a câmera para uma **sala de demonstração** (com o seu
+    personagem nela) e cada opção muda a sala na hora:
     - sombras (desligadas, baixas ou altas);
     - redução de texturas;
     - distância de renderização: marcos a 100, 200, 400, 800 e 1500 studs somem conforme a opção;
@@ -38,9 +50,15 @@ reservado roda a **partida** (`src/shared/PlaceMode.luau` decide isso quando o s
   1. os dados rolam com física e a **peça única do grupo** anda;
   2. aparece um **enigma** do que vai acontecer;
   3. há **10 s** de contagem;
-  4. as portas se abrem e o evento acontece **onde o tabuleiro está**.
+  4. as portas se abrem e o evento começa onde o tabuleiro está.
+- O tabuleiro tem um **contorno branco visível através das paredes**, para todos sempre saberem onde ele está.
 - O tabuleiro pode ser **carregado nas costas** entre os cenários. A cada 60 s o dado libera de novo, e cada jogada
-  **soma** um novo evento aos que já estão ativos (até 4 ao mesmo tempo). Chegar à última casa (40) vence.
+  **soma** um novo evento aos que já estão ativos. Chegar à última casa (40) vence.
+- **Os eventos duram até o fim da partida.** Eventos físicos acontecem em **vários pontos do mapa ao mesmo tempo**
+  e, ao terminar um foco, recomeçam em outro lugar; eventos de bichos mandam novas ondas perto dos jogadores.
+- **O mapa muda de textura** em volta de cada foco de evento físico (areia na Areia Movediça, lama na Monção, mato
+  nos Cipós, pedra rachada no Terremoto, terra revirada no Tornado, chão pisoteado na Debandada). Um bloco que já
+  mudou não muda de novo.
 - **Cenário destrutível:** paredes, pisos do 2º andar, cercas vivas, vidros e móveis quebram em pedaços. Os pedaços somem
   depois de 20 s (com limite global) para não pesar no aparelho.
 - **Armas espalhadas** pelo mapa: Facão, Revólver, Espingarda e Dinamite. Não há fogo amigo.
@@ -61,13 +79,19 @@ reservado roda a **partida** (`src/shared/PlaceMode.luau` decide isso quando o s
 | Terremoto | físico | 14 |
 | O Caçador | NPC | 18 |
 
-- Morreu ou caiu da ilha: vira espectador. Todos eliminados = derrota. No fim, todos voltam ao lobby.
+- Morreu ou caiu da ilha: vira espectador. Todos eliminados = derrota.
+- **Fim da partida:** a câmera treme e avança até o tabuleiro, a tela fica branca e aparece o **melhor da partida**
+  (quem mais abateu bichos e jogou o dado), com a classificação de todos. Depois, todos voltam ao lobby.
 - Skins de peça ainda **não** existem. Há um ponto de extensão comentado em `src/game/server/BoardModel.luau`.
 
 ### Controles
 
 | Ação | PC | Celular / console |
 |---|---|---|
+| Andar / olhar | `WASD` + mouse | analógico + arrastar na tela |
+| Correr | segurar `Shift` | botão "Correr" (liga/desliga) / `L3` |
+| Escalar (partida) | olhar para a parede e segurar `Espaço` | segurar Pular |
+| Mostrar/esconder as salas no hub | `Q` | botão "Salas" |
 | Pegar tabuleiro / arma | `E` (prompt) | tocar no prompt |
 | Jogar o dado | `T` | botão na tela |
 | Soltar o tabuleiro | `G` | botão na tela |
@@ -161,19 +185,24 @@ O carregamento fica alguns segundos mais longo.
 ## Ajustes rápidos
 
 Tudo que é número de balanceamento fica em `src/shared/Config/GameConfig.luau`:
-- tempo entre jogadas, número de casas e eventos simultâneos;
+- tempo entre jogadas, número de casas e limite de focos de eventos (`MAX_EVENT_SITES`, `PHYSICAL_EVENT_SITES`);
 - raio da ilha;
 - vida dos pedaços de destruição e limite de NPCs;
 - quantidade de armas.
 
-Cada evento tem `Weight`, `MinSpace`, `Duration` e `Radius` no topo do seu arquivo em `src/game/server/Events/`.
+Cada evento tem `Weight`, `MinSpace`, `Duration` (duração de cada foco), `Radius`, `Sites` (focos ao mesmo tempo) e
+`Skin` (material/cores dos blocos em volta) no topo do seu arquivo em `src/game/server/Events/`.
+
+Corrida, estamina e escalada: constantes no topo de `src/shared/Character/Movement.luau`. Balanço da câmera:
+`src/shared/Character/FirstPerson.luau`. Animação: `src/shared/Character/R6Animator.luau`.
 
 ## Estrutura do código
 
 ```
 default.project.json  projeto Rojo do place único (lobby + partida)
-src/shared/        ReplicatedStorage.Shared: rede, configs, kit de UI, configurações do jogador, PlaceMode
-src/serverShared/  ServerScriptService.ServerShared: DataStore das configurações
+src/shared/        ReplicatedStorage.Shared: rede, configs, kit de UI, configurações do jogador, PlaceMode,
+                   Character/ (animação R6, primeira pessoa, corrida e escalada)
+src/serverShared/  ServerScriptService.ServerShared: DataStore das configurações, personagens R6, placar global
 src/lobby/         servidor e cliente do lobby (menu, hub, salas, teleporte, sala de demonstração)
 src/game/server/   partida: MatchService, BoardService, EventService, Map/, Events/, NPC/, Weapons/, DestructionService
 src/game/client/   tela de carregamento, HUD, enigma, efeitos, espectador, armas
@@ -187,5 +216,6 @@ scripts/publish.sh gera o place e publica pela API Open Cloud
 - O código passou por verificação estática de tipos e revisão, mas **ainda não foi testado dentro do Roblox**.
   Espere ajustes de posição, tamanho e balanceamento no primeiro teste. Se aparecer erro no console
   (`/console` no chat), copie a mensagem para corrigirmos.
-- Não há animações com assets: NPCs e armas usam movimentos procedurais simples.
+- Não há animações com assets: personagens, NPCs e armas usam movimentos procedurais.
+- A Areia Movediça afunda visualmente só personagens R15; com R6 o jogador fica lento e perde vida, mas não afunda.
 - Sons vêm vazios até você colocar os IDs.

@@ -5,7 +5,7 @@
 --   * Cubículo fechado ATRÁS da câmera do menu com o SpawnLocation (os personagens não aparecem no menu).
 --   * Hub multiplayer (GameConfig.HUB_ORIGIN): salão de um templo na selva com colunas, tochas,
 --     estátua do tabuleiro no centro, cipós e uma cachoeira decorativa.
--- Também cria workspace.LobbyMarkers com MenuCamera, MenuSpawn, HubSpawn e HubCamera.
+-- Também cria workspace.LobbyMarkers com MenuCamera, MenuCharacter, MenuSpawn, HubSpawn e HubCamera.
 -- Nada é construído perto de GameConfig.DEMO_ROOM_ORIGIN (a sala de demonstração fica lá).
 --
 -- Luzes que o cliente anima (LobbyAmbience): atributo "Flicker" (tremulação de vela/tocha) ou "Pulse"
@@ -876,6 +876,9 @@ local function buildMenuScene(root: Instance, markers: Instance)
 	-- Câmera do menu: enquadra a mesa pela direita da tela (o menu fica à esquerda), levemente de cima.
 	local cameraPosition = m(-4, 8.5, 9)
 	setMarker(markers, "MenuCamera", CFrame.lookAt(cameraPosition, cameraPosition + Vector3.new(0, -0.306, -1)))
+	-- Boneco do jogador no menu (cópia local do personagem, ver MenuPuppet): em pé atrás da mesa,
+	-- de frente para a câmera. O CFrame marca o chão sob os pés.
+	setMarker(markers, "MenuCharacter", CFrame.lookAt(m(2.2, 0, -9.4), m(-3, 0, 9)))
 
 	-- Casca: interior x -20..20, z -18..18, piso em y 0, paredes laterais até 10 e cumeeira em 18,4.
 	local shell = PartBuilder.model("Sotao", scene)

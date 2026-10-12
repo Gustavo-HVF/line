@@ -199,6 +199,18 @@ local function cooldownRemaining(): number
 	return math.max(cooldownEndsAt - workspace:GetServerTimeNow(), 0)
 end
 
+-- Contorno branco visível através das paredes: todo mundo sempre sabe onde o tabuleiro está.
+local function addHighlight(model: Model)
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "Destaque"
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.FillTransparency = 1
+	highlight.OutlineColor = Color3.new(1, 1, 1)
+	highlight.OutlineTransparency = 0
+	highlight.Adornee = model
+	highlight.Parent = model
+end
+
 local function canRollNow(): boolean
 	return rollingEnabled and not locked and not rolling and cooldownRemaining() <= 0
 end
@@ -577,6 +589,7 @@ local function performRoll(player: Player)
 	broadcastStatus()
 
 	BoardService.Rolled:Fire({
+		rollerUserId = player.UserId,
 		dice = values,
 		total = total,
 		fromSpace = fromSpace,
@@ -697,6 +710,7 @@ local function rebuild()
 	end
 	ensureFolders()
 	board = BoardModel.Build(boardFolder, GameConfig.BOARD_SPACES)
+	addHighlight(board.model)
 	createPrompts()
 	if lastRiddle then
 		BoardModel.SetRiddle(board, lastRiddle)
@@ -805,6 +819,7 @@ function BoardService.Init(info)
 
 	ensureFolders()
 	board = BoardModel.Build(boardFolder, GameConfig.BOARD_SPACES)
+	addHighlight(board.model)
 	createPrompts()
 	local spawnCFrame = resolveSpawn(info.boardSpawn)
 	lastSafeCFrame = spawnCFrame

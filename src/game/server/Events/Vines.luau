@@ -51,6 +51,12 @@ return {
 	MinSpace = 3,
 	Duration = 90,
 	Radius = 45,
+	Sites = 3, -- focos ao mesmo tempo, espalhados pelo mapa
+	-- blocos em volta de cada foco viram mato e folhas (permanente; um bloco só muda uma vez)
+	Skin = {
+		Material = Enum.Material.LeafyGrass,
+		Colors = { Color3.fromRGB(66, 114, 48), Color3.fromRGB(54, 98, 42), Color3.fromRGB(80, 130, 56) },
+	},
 
 	Start = function(ctx)
 		local trove = PhysUtil.newTrove()

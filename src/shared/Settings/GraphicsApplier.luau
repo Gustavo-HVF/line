@@ -620,6 +620,8 @@ function GraphicsApplier.Init()
 	initialized = true
 
 	workspace.DescendantAdded:Connect(onDescendantAdded)
+	-- Um evento físico trocou o material do bloco (ex.: virou areia): reaplica a redução de texturas nele.
+	CollectionService:GetInstanceAddedSignal(Tags.EventSkinned):Connect(onDescendantAdded)
 	CollectionService:GetInstanceAddedSignal(CULL_TAG):Connect(addChunk)
 	CollectionService:GetInstanceRemovedSignal(CULL_TAG):Connect(removeChunk)
 	task.spawn(registerExistingChunks)
