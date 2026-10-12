@@ -904,6 +904,11 @@ function BoardService.Drop(position: Vector3?)
 	end
 end
 
+-- true enquanto os dados rolam e a peça anda (o tabuleiro não deve ser movido nesse intervalo).
+function BoardService.IsRolling(): boolean
+	return rolling
+end
+
 -- Travado: ninguém pega nem joga. Se alguém estiver carregando, o tabuleiro cai no chão.
 function BoardService.SetLocked(value: boolean)
 	locked = value == true

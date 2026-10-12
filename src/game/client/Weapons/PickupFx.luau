@@ -103,8 +103,15 @@ function PickupFx.Init()
 	end
 	initialized = true
 	task.spawn(function()
-		local map = workspace:WaitForChild("Map", 300)
-		local folder = map and map:WaitForChild(FOLDER_NAME, 120)
+		-- O mapa (e só depois as armas) pode demorar a ficar pronto: espera sem desistir.
+		local map = workspace:FindFirstChild("Map")
+		while not map do
+			map = workspace:WaitForChild("Map", 30)
+		end
+		local folder = map:FindFirstChild(FOLDER_NAME)
+		while not folder and map.Parent do
+			folder = map:WaitForChild(FOLDER_NAME, 30)
+		end
 		if folder then
 			attach(folder)
 		end

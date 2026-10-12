@@ -202,13 +202,20 @@ local function requestReload(auto: boolean?)
 	if isReloading(state) or serverCount(state) >= numberAttr(tool, "MaxAmmo", 0) then
 		return
 	end
-	state.localReloadUntil = os.clock() + numberAttr(tool, "ReloadTime", 1.5)
+	local reloadTime = numberAttr(tool, "ReloadTime", 1.5)
+	state.localReloadUntil = os.clock() + reloadTime
 	if not auto then
 		local handle = getHandle(tool)
 		SoundUtil.Play("Reload", { Parent = handle, Volume = 0.6 })
 	end
 	remotes.reload:FireServer(tool)
 	refreshUI()
+	-- Se o servidor recusar (nenhum atributo muda), o aviso "Recarregando..." não pode ficar preso na tela.
+	task.delay(reloadTime + 0.1, function()
+		if equipped == state then
+			refreshUI()
+		end
+	end)
 end
 
 local function fireGun(state: Equipped)

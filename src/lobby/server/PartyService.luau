@@ -103,8 +103,13 @@ local function isStarting(party: Party): boolean
 end
 
 -- Corta uma string em no máximo `maxChars` caracteres UTF-8 (nil se o texto não for UTF-8 válido).
+-- Um caractere cortado ao meio no fim (a caixa de texto do cliente limita por bytes) é descartado.
 local function truncateUtf8(text: string, maxChars: number): string?
-	local length = utf8.len(text)
+	local length, invalidAt = utf8.len(text)
+	if not length and invalidAt then
+		text = string.sub(text, 1, invalidAt - 1)
+		length = utf8.len(text)
+	end
 	if not length then
 		return nil
 	end

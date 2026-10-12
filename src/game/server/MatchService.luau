@@ -299,7 +299,20 @@ function spawnCharacter(player: Player)
 		return
 	end
 	local character = player.Character
+	if player.Parent and not character then
+		-- Garantia: se o carregamento devolveu antes de o personagem existir, espera um pouco por ele.
+		local deadline = os.clock() + 5
+		while player.Parent and not player.Character and os.clock() < deadline do
+			task.wait(0.1)
+		end
+		character = player.Character
+	end
 	if not player.Parent or not character then
+		local attempts = (spawnAttempts[player] or 0) + 1
+		spawnAttempts[player] = attempts
+		if player.Parent and attempts < SPAWN_ATTEMPTS then
+			task.delay(2, spawnCharacter, player)
+		end
 		return
 	end
 	local humanoid = character:FindFirstChildOfClass("Humanoid") or character:WaitForChild("Humanoid", 5)
@@ -308,7 +321,8 @@ function spawnCharacter(player: Player)
 		return
 	end
 	record.spawned = true
-	character:PivotTo(nextSpawnCFrame() + Vector3.new(0, 3, 0))
+	-- Os spawns do mapa já estão na altura do HumanoidRootPart; só uma folga pequena.
+	character:PivotTo(nextSpawnCFrame() + Vector3.new(0, 0.5, 0))
 	humanoid.MaxHealth = GameConfig.PLAYER_MAX_HEALTH
 	humanoid.Health = GameConfig.PLAYER_MAX_HEALTH
 	player:SetAttribute("LastDamageSource", nil)
@@ -451,11 +465,12 @@ local function endMatch(victory: boolean)
 	end
 	finished = true
 	pcall(BoardService.SetRollingEnabled, false)
-	pcall(BoardService.SetLocked, true)
 	local ok, err = pcall(EventService.StopAll)
 	if not ok then
 		warn("[MatchService] Erro ao encerrar os eventos: " .. tostring(err))
 	end
+	-- Trava DEPOIS do StopAll: o cleanup de um evento (ex.: pelicano) chama SetLocked(false).
+	pcall(BoardService.SetLocked, true)
 	if NPCService and type(NPCService.DespawnAll) == "function" then
 		ok, err = pcall(NPCService.DespawnAll)
 		if not ok then

@@ -228,6 +228,14 @@ local function stopRecord(record, natural: boolean?)
 	-- O cleanup pode ceder (ex.: fade de NPCs): roda em outra thread e só então destrói a pasta.
 	local folder = record.folder
 	local cleanup = record.cleanup
+	-- Rede de segurança: os NPCs do evento usam groupId = instanceId. Se o Start falhou (sem cleanup)
+	-- ou o cleanup quebrou/travou, eles sumiriam nunca.
+	local function despawnGroup()
+		local npc = services.NPC
+		if npc and type(npc.DespawnGroup) == "function" then
+			pcall(npc.DespawnGroup, record.instanceId)
+		end
+	end
 	task.spawn(function()
 		if cleanup then
 			local ok, err = pcall(cleanup)
@@ -235,11 +243,13 @@ local function stopRecord(record, natural: boolean?)
 				warn(("[EventService] Erro no cleanup de '%s': %s"):format(record.instanceId, tostring(err)))
 			end
 		end
+		despawnGroup()
 		if folder and folder.Parent then
 			folder:Destroy()
 		end
 	end)
 	task.delay(CLEANUP_TIMEOUT, function()
+		despawnGroup()
 		if folder and folder.Parent then
 			folder:Destroy()
 		end

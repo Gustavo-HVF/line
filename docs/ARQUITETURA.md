@@ -274,6 +274,7 @@ BoardService.Drop(position: Vector3?)    -- o carregador solta o tabuleiro (no c
 BoardService.SetLocked(locked: boolean)  -- travado: ninguém pega nem joga (ex.: pelicano carregando)
 BoardService.PlaceAt(cframe: CFrame)     -- coloca o tabuleiro no chão nessa posição (solta o carregador)
 BoardService.ShowRiddle(text: string)    -- texto no "vidro" central do tabuleiro
+BoardService.IsRolling(): boolean         -- true enquanto dados/peça animam (não mover o tabuleiro)
 ```
 
 ### [flow] `Game/EventService.luau`

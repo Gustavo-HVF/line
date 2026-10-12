@@ -60,7 +60,8 @@ end
 
 -- Causa dano a um jogador. `source` é um texto curto usado na mensagem de eliminação (ex.: "Leão").
 function CombatUtil.DamagePlayer(player: Player, amount: number, source: string?)
-	if amount <= 0 or not CombatUtil.IsPlayerAlive(player) then
+	-- NaN passaria pelo "<= 0" e deixaria a vida em NaN (nunca morre, nunca é eliminado: a derrota trava).
+	if type(amount) ~= "number" or amount ~= amount or amount <= 0 or not CombatUtil.IsPlayerAlive(player) then
 		return
 	end
 	local humanoid = CombatUtil.GetHumanoid(player.Character)
@@ -125,7 +126,7 @@ end
 
 -- Causa dano a um inimigo. Retorna true se o golpe matou o inimigo.
 function CombatUtil.DamageEnemy(model: Model, amount: number, attacker: Player?): boolean
-	if amount <= 0 or not CombatUtil.IsEnemyAlive(model) then
+	if type(amount) ~= "number" or amount ~= amount or amount <= 0 or not CombatUtil.IsEnemyAlive(model) then
 		return false
 	end
 	if attacker then
@@ -151,6 +152,9 @@ function CombatUtil.DamagePlayersInRadius(
 	source: string?
 ): { Player }
 	local hit = {}
+	if not (radius > 0) then
+		return hit -- raio 0 (ou NaN) daria falloff NaN
+	end
 	for _, player in CombatUtil.GetAlivePlayers() do
 		local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
 		if root then
@@ -173,6 +177,9 @@ function CombatUtil.DamageEnemiesInRadius(
 	attacker: Player?
 ): number
 	local count = 0
+	if not (radius > 0) then
+		return count
+	end
 	for _, enemy in CollectionService:GetTagged(Tags.Enemy) do
 		if enemy:IsA("Model") and enemy:IsDescendantOf(workspace) and CombatUtil.IsEnemyAlive(enemy) then
 			local pivot = enemy:GetPivot().Position

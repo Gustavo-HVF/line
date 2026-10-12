@@ -196,10 +196,20 @@ local function openCreateModal()
 	UIKit.Label({ Text = "Nome da sala", TextSize = 17, LayoutOrder = 2, Parent = panel })
 	local nameBox = UIKit.TextBox({
 		PlaceholderText = ("Sala de %s"):format(player.DisplayName),
-		MaxLength = GameConfig.PARTY_NAME_MAX,
 		LayoutOrder = 3,
 		Parent = panel,
 	})
+	-- Limite em caracteres (não em bytes): cortar por bytes quebraria letras acentuadas no meio.
+	nameBox:GetPropertyChangedSignal("Text"):Connect(function()
+		local text = nameBox.Text
+		local length = utf8.len(text)
+		if length and length > GameConfig.PARTY_NAME_MAX then
+			local cut = utf8.offset(text, GameConfig.PARTY_NAME_MAX + 1)
+			if cut then
+				nameBox.Text = string.sub(text, 1, cut - 1)
+			end
+		end
+	end)
 	local hint = UIKit.Label({
 		TextSize = 15,
 		TextColor3 = Theme.TextMuted,

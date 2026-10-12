@@ -329,7 +329,9 @@ return {
 				setPose(aim - position, true)
 				local distance = (position - target).Magnitude
 				local late = os.clock() > deadline
-				if not locked and (distance <= LOCK_DISTANCE or late) then
+				-- Não agarra no meio de uma rolagem (dados e peça ainda animando): espera ela terminar.
+				local boardBusy = Board.IsRolling ~= nil and Board.IsRolling()
+				if not locked and not boardBusy and (distance <= LOCK_DISTANCE or late) then
 					if holder ~= nil and holder ~= ctx.instanceId then
 						break -- outro pelicano já está com o tabuleiro
 					end

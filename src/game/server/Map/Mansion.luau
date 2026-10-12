@@ -970,14 +970,17 @@ function Mansion.Build(ctx)
 			M.Wood
 		)
 	end
-	-- Portas de entrada abertas para dentro (decorativas).
+	-- Portas de entrada abertas para dentro (decorativas), encostadas na face interna da fachada.
+	-- Em pé (perpendiculares à parede) a folha oeste deixava só ~1,5 stud até o corrimão e
+	-- bloqueava o acesso ao pé da escadaria principal.
+	local doorWidth = OPENINGS.frontDoor.width
 	for _, sx in { -1, 1 } do
 		Kit.box(
 			ctx,
 			porch,
 			"PortaDeEntrada",
-			Vector3.new(CX + sx * 3.75, FLOOR[0] + 5.45, CZ + HALF_D - T_EXT / 2 - 2),
-			Vector3.new(0.4, 10.8, 3.9),
+			Vector3.new(CX + sx * (doorWidth / 2 + 1.95), FLOOR[0] + 5.45, CZ + HALF_D - T_EXT / 2 - 0.22),
+			Vector3.new(3.9, 10.8, 0.4),
 			Palette.WoodRed,
 			M.Wood
 		)
@@ -1038,6 +1041,8 @@ function Mansion.Build(ctx)
 					-- Áreas reservadas: as escadas e o espaço livre até a parede na frente do primeiro degrau.
 					if key == "Hall" then
 						room:reserveWorld(CX - 13.5, CX - 5.5, CZ + 26, CZ + HALF_D)
+						-- Folhas da porta de entrada encostadas na fachada.
+						room:reserveWorld(CX - 8, CX + 8, CZ + HALF_D - T_EXT / 2 - 0.6, CZ + HALF_D)
 					elseif key == "EscadaFundos" then
 						room:reserveWorld(CX - 13.5, CX - 5.5, CZ - HALF_D, CZ - 26)
 					elseif key == "Biblioteca" then

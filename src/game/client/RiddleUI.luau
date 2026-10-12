@@ -173,6 +173,8 @@ local function show(payload)
 
 	local shownAt = os.clock()
 	local eventAt = shownAt + payload.countdown
+	-- Na primeira jogada a contagem (10 s) passa de HIDE_AFTER: o painel fica até ela terminar.
+	local hideAfter = math.max(HIDE_AFTER, payload.countdown + 1)
 
 	-- Máquina de escrever (MaxVisibleGraphemes não quebra acentos)
 	task.spawn(function()
@@ -198,7 +200,7 @@ local function show(payload)
 			else
 				ui.timer.Text = "Começou!"
 			end
-			if os.clock() - shownAt >= HIDE_AFTER then
+			if os.clock() - shownAt >= hideAfter then
 				hide()
 				break
 			end

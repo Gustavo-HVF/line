@@ -546,6 +546,10 @@ export type LightingTarget = {
 
 local lightingStack: { { key: string, target: LightingTarget } } = {}
 local lightingBase: LightingTarget? = nil
+-- Valores originais enquanto a tween de volta ainda roda: um evento que começa nesse meio-tempo não pode
+-- capturar a iluminação meio escura como "original" (ficaria escuro para sempre depois dele).
+local restoringBase: LightingTarget? = nil
+local restoringUntil = 0
 
 local function captureLighting(): LightingTarget
 	local atmosphere = Lighting:FindFirstChildOfClass("Atmosphere")
@@ -578,7 +582,12 @@ end
 -- `makeTarget(base)` recebe os valores originais e devolve o alvo deste evento.
 function PhysUtil.PushLighting(key: string, makeTarget: (LightingTarget) -> LightingTarget, seconds: number?)
 	if not lightingBase then
-		lightingBase = captureLighting()
+		if restoringBase and os.clock() < restoringUntil then
+			lightingBase = restoringBase
+		else
+			lightingBase = captureLighting()
+		end
+		restoringBase = nil
 	end
 	for index = #lightingStack, 1, -1 do
 		if lightingStack[index].key == key then
@@ -611,6 +620,8 @@ function PhysUtil.PopLighting(key: string, seconds: number?)
 	local base = lightingBase :: LightingTarget
 	if #lightingStack == 0 then
 		lightingBase = nil
+		restoringBase = base
+		restoringUntil = os.clock() + (seconds or 3) + 0.1
 		tweenLighting(base, seconds or 3)
 	else
 		local merged = table.clone(base)

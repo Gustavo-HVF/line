@@ -465,7 +465,7 @@ function UIKit.Slider(props: { [string]: any }): Control<number>
 			updateFromX(input.Position.X)
 		end
 	end)
-	UserInputService.InputChanged:Connect(function(input)
+	local changedConnection = UserInputService.InputChanged:Connect(function(input)
 		if
 			dragging
 			and (
@@ -476,13 +476,18 @@ function UIKit.Slider(props: { [string]: any }): Control<number>
 			updateFromX(input.Position.X)
 		end
 	end)
-	UserInputService.InputEnded:Connect(function(input)
+	local endedConnection = UserInputService.InputEnded:Connect(function(input)
 		if
 			input.UserInputType == Enum.UserInputType.MouseButton1
 			or input.UserInputType == Enum.UserInputType.Touch
 		then
 			dragging = false
 		end
+	end)
+	-- Conexões globais: desconecta quando o controle for destruído (evita vazamento).
+	row.Destroying:Connect(function()
+		changedConnection:Disconnect()
+		endedConnection:Disconnect()
 	end)
 	return control
 end
@@ -566,9 +571,15 @@ function UIKit.TextBox(props: { [string]: any }): TextBox
 	UIKit.Padding(box, 8)
 	applyProps(box, props, { MaxLength = true, OnChanged = true })
 	if props.MaxLength then
+		-- Limita por caracteres (não bytes) para não cortar letras acentuadas no meio.
 		box:GetPropertyChangedSignal("Text"):Connect(function()
-			if #box.Text > props.MaxLength then
-				box.Text = box.Text:sub(1, props.MaxLength)
+			local text = box.Text
+			local length = utf8.len(text)
+			if length and length > props.MaxLength then
+				local cut = utf8.offset(text, props.MaxLength + 1)
+				if cut then
+					box.Text = string.sub(text, 1, cut - 1)
+				end
 			end
 		end)
 	end
