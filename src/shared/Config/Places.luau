@@ -7,6 +7,8 @@
 -- Enquanto os IDs forem 0, o teleporte mostra um aviso em vez de tentar teleportar.
 
 return {
-	LOBBY_PLACE_ID = 0,
+	-- Lobby: https://www.roblox.com/games/6305250851/Gustavogame979s-Place
+	LOBBY_PLACE_ID = 6305250851,
+	-- Partida: falta criar o segundo place nessa mesma experiência e colar o ID aqui.
 	GAME_PLACE_ID = 0,
 }
