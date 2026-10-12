@@ -1,5 +1,5 @@
 {
-  "name": "TamboresLobby",
+  "name": "TamboresDaSelva",
   "tree": {
     "$className": "DataModel",
     "ReplicatedStorage": {
@@ -13,18 +13,34 @@
       },
       "Lobby": {
         "$path": "src/lobby/server"
+      },
+      "Game": {
+        "$path": "src/game/server"
       }
     },
     "StarterPlayer": {
       "StarterPlayerScripts": {
         "Lobby": {
           "$path": "src/lobby/client"
+        },
+        "Game": {
+          "$path": "src/game/client"
         }
+      }
+    },
+    "Workspace": {
+      "$properties": {
+        "StreamingEnabled": false
       }
     },
     "Lighting": {
       "$properties": {
         "Technology": "Future"
+      }
+    },
+    "TextChatService": {
+      "$properties": {
+        "ChatVersion": "TextChatService"
       }
     }
   }

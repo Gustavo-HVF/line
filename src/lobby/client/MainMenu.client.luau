@@ -11,6 +11,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+-- Place único: no servidor da partida este menu não existe (quem roda é o GameClient).
+if require(Shared:WaitForChild("PlaceMode")).Get() ~= "lobby" then
+	return
+end
+
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)

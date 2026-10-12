@@ -10,6 +10,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local StarterGui = game:GetService("StarterGui")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
+-- Place único: no lobby este cliente não roda (quem roda é o MainMenu).
+if require(Shared:WaitForChild("PlaceMode")).Get() ~= "game" then
+	return
+end
+
 local Net = require(ReplicatedStorage.Shared.Net)
 local UIKit = require(ReplicatedStorage.Shared.UI.UIKit)
 

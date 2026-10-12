@@ -12,7 +12,7 @@ Quem implementa um módulo segue exatamente estas assinaturas, e quem usa um mó
 - Requires:
   - código compartilhado: `require(ReplicatedStorage.Shared.Net)`, `require(ReplicatedStorage.Shared.Config.GameConfig)`, etc.
   - mesmo lado e mesma pasta: `require(script.Parent.Modulo)`.
-  - servidor compartilhado entre places: `require(ServerScriptService.ServerShared.SettingsStore)`.
+  - servidor compartilhado entre lobby e partida: `require(ServerScriptService.ServerShared.SettingsStore)`.
 - Toda geometria é gerada por código (não existem assets prontos). Use `Shared/Util/PartBuilder`.
 - Servidor autoritativo: o cliente só **pede** ações; o servidor valida tudo (distância, cooldown, munição, dono do item).
 - Nada de `while true do` sem `task.wait`; loops grandes de construção usam `PartBuilder.yielder()`.
@@ -22,17 +22,29 @@ Quem implementa um módulo segue exatamente estas assinaturas, e quem usa um mó
   cliente (`GraphicsApplier`). Eventos podem mexer em `ClockTime`, `Brightness`, `FogEnd`/`FogStart` e `Atmosphere`.
 - Verificação: `TOOLS=<bin> ROBLOX_TYPES=<globalTypes.d.luau> scripts/check.sh [arquivos...]` (luau-lsp + StyLua).
 
-## Places e fluxo
+## Place único e fluxo
+
+Um só place (`default.project.json`) contém o lobby **e** a partida. O modo de cada servidor é decidido quando ele liga,
+por `Shared/PlaceMode.luau`:
 
 ```
-Lobby place (lobby.project.json)                   Game place (game.project.json)
-  Menu: Jogar Solo | Multiplayer | Configurações  ───TeleportAsync──►  Partida no servidor reservado
-  Multiplayer → Hub: criar/entrar em salas                              Fim (vitória/derrota) ──► volta ao Lobby
-  Configurações → Áudio | Gráficos (sala de demonstração)
+Servidor público = LOBBY                            Servidor reservado do MESMO place = PARTIDA
+  Menu: Jogar Solo | Multiplayer | Configurações  ──ReserveServer(game.PlaceId) + TeleportAsync──►  Partida
+  Multiplayer → Hub: criar/entrar em salas                          Fim (vitória/derrota) ──TeleportAsync(game.PlaceId)──►
+  Configurações → Áudio | Gráficos (sala de demonstração)            servidor público (lobby)
 ```
 
-Os IDs ficam em `Shared/Config/Places.luau`. Com ID `0` ou rodando no Studio, o teleporte **não** é tentado: o servidor
-manda `Menu_TeleportStatus("studio", mensagem)` explicando como testar.
+- `PlaceMode.Get(): "lobby" | "game"`. Servidor: `game.PrivateServerId ~= ""` e `game.PrivateServerOwnerId == 0`
+  (servidor reservado) → `"game"`; qualquer outro (inclusive VIP) → `"lobby"`. No Studio vale `Places.STUDIO_MODE`.
+  O servidor publica o modo em `ReplicatedStorage:GetAttribute("PlaceMode")`; no cliente, `Get()` espera esse atributo.
+- **Todo script de entrada** (`LobbyMain.server`, `GameMain.server`, `MainMenu.client`, `GameClient.client`,
+  `WeaponClient.client`) chama `PlaceMode.Get()` no começo e sai (`return`) se o modo não for o dele. Os ModuleScripts
+  só são carregados por esses scripts, então o código do outro modo nunca roda. Script de entrada novo precisa da mesma guarda.
+- `GameMain` desliga `Players.CharacterAutoLoads` logo depois da guarda (no lobby ele fica ligado).
+- Teleporte sempre para `game.PlaceId`. No Studio ou com `PlaceId = 0`, o teleporte **não** é tentado: o servidor
+  manda `Menu_TeleportStatus("studio", mensagem)` explicando como testar.
+- `Shared/Config/Places.luau` guarda `UNIVERSE_ID`/`PLACE_ID` (referência e publicação) e `STUDIO_MODE`.
+- Publicação sem Studio: `scripts/publish.sh` (Rojo + Open Cloud Place Publishing, chave em `ROBLOX_API_KEY`).
 
 **TeleportData** (enviado pelo lobby, lido no jogo com `player:GetJoinData().TeleportData`):
 
@@ -40,13 +52,13 @@ manda `Menu_TeleportStatus("studio", mensagem)` explicando como testar.
 { mode = "solo" | "multiplayer", partyId = string, hostUserId = number, expectedUserIds = { number }, partyName = string }
 ```
 
-No place do jogo, sem TeleportData (teste direto no Studio) = modo `"solo"` com quem estiver no servidor.
+Na partida, sem TeleportData (teste no Studio com `STUDIO_MODE = "game"`) = modo `"solo"` com quem estiver no servidor.
 
 ## Árvore de arquivos e dono de cada parte
 
 ```
 src/shared/                          → ReplicatedStorage.Shared               (PRONTO, exceto onde indicado)
-  Net.luau, Tags.luau
+  Net.luau, Tags.luau, PlaceMode.luau
   Config/GameConfig.luau, Config/Places.luau, Config/Sounds.luau
   Audio/SoundUtil.luau
   Util/Signal.luau, Util/PartBuilder.luau

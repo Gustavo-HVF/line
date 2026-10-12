@@ -1,11 +1,13 @@
 --!nonstrict
--- Teleporte do lobby para o place da PARTIDA, sempre num servidor reservado (só o grupo entra nele).
+-- Teleporte do lobby para a PARTIDA, sempre num servidor reservado (só o grupo entra nele).
+-- O place é único: o servidor reservado é do MESMO place (game.PlaceId) e, por ser reservado,
+-- roda como partida (ver Shared/PlaceMode).
 --
 --   TeleportHandler.Init()
 --   TeleportHandler.TeleportToGame(players, data): (boolean, string?)
 --
--- No Studio (ou com Places.GAME_PLACE_ID = 0) o teleporte não é tentado: cada jogador recebe
--- Menu_TeleportStatus("studio", mensagem) explicando como testar a partida.
+-- No Studio (ou num place ainda não publicado, PlaceId = 0) o teleporte não é tentado: cada jogador
+-- recebe Menu_TeleportStatus("studio", mensagem) explicando como testar a partida.
 -- Os jogadores recebem Menu_TeleportStatus("teleporting", ...) enquanto o servidor reserva e teleporta,
 -- e Menu_TeleportStatus("failed", ...) com uma mensagem amigável se algo der errado.
 
@@ -15,7 +17,6 @@ local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 
 local Net = require(ReplicatedStorage.Shared.Net)
-local Places = require(ReplicatedStorage.Shared.Config.Places)
 local Signal = require(ReplicatedStorage.Shared.Util.Signal)
 
 export type TeleportData = {
@@ -37,9 +38,8 @@ local INIT_FAILED_RETRIES = 2 -- novas tentativas depois de TeleportInitFailed (
 local PENDING_TIMEOUT = 45 -- segundos em que um jogador fica marcado como "teleportando"
 local MAX_PARTY_NAME_BYTES = 120
 
-TeleportHandler.STUDIO_MESSAGE = "Teleporte não funciona no Studio / IDs não configurados. "
-	.. "Para testar a partida, abra o place do jogo (game.project.json) e aperte Play. "
-	.. "Configure os IDs em Shared/Config/Places."
+TeleportHandler.STUDIO_MESSAGE = "Teleporte não funciona no Studio nem em place não publicado. "
+	.. 'Para testar a partida no Studio, troque STUDIO_MODE para "game" em Shared/Config/Places e aperte Play.'
 
 local MESSAGES = {
 	reserving = "Reservando um servidor para a partida…",
@@ -54,9 +54,8 @@ local RESULT_MESSAGES = {
 	[Enum.TeleportResult.Flooded] = "Muitos pedidos de teleporte ao mesmo tempo. Espere alguns segundos e tente de novo.",
 	[Enum.TeleportResult.GameFull] = "O servidor da partida está cheio.",
 	[Enum.TeleportResult.GameEnded] = "A partida não está mais disponível. Tente de novo.",
-	[Enum.TeleportResult.GameNotFound] = "O place da partida não foi encontrado. Confira os IDs em Shared/Config/Places.",
-	[Enum.TeleportResult.Unauthorized] = "Sem permissão para entrar no place da partida. Os dois places precisam estar "
-		.. "na mesma experiência.",
+	[Enum.TeleportResult.GameNotFound] = "O servidor da partida não foi encontrado. Tente de novo.",
+	[Enum.TeleportResult.Unauthorized] = "Sem permissão para entrar no servidor da partida.",
 	[Enum.TeleportResult.Failure] = MESSAGES.teleportFailed,
 }
 
@@ -109,17 +108,21 @@ local function release(list: { Player })
 	end
 end
 
--- Teleporte desativado: Studio ou IDs ainda não configurados.
+-- Place da partida = este mesmo place.
+local function matchPlaceId(): number
+	return game.PlaceId
+end
+
+-- Teleporte desativado: Studio ou place ainda não publicado.
 function TeleportHandler.IsStudioBlocked(): boolean
-	local placeId = Places.GAME_PLACE_ID
-	return type(placeId) ~= "number" or placeId <= 0 or RunService:IsStudio()
+	return matchPlaceId() <= 0 or RunService:IsStudio()
 end
 
 function TeleportHandler.IsPending(player: Player): boolean
 	return (pendingUntil[player] or 0) > os.clock()
 end
 
--- Garante um TeleportData bem formado (o place do jogo valida de novo ao ler).
+-- Garante um TeleportData bem formado (a partida valida de novo ao ler).
 local function buildTeleportData(data: any, list: { Player }): TeleportData
 	local source = type(data) == "table" and data or {}
 	local expected = {}
@@ -158,7 +161,7 @@ local function reserveServer(): (string?, string?)
 	local lastError = nil
 	for attempt = 1, RESERVE_ATTEMPTS do
 		local ok, accessCode = pcall(function()
-			return TeleportService:ReserveServer(Places.GAME_PLACE_ID)
+			return TeleportService:ReserveServer(matchPlaceId())
 		end)
 		if ok and type(accessCode) == "string" and accessCode ~= "" then
 			return accessCode, nil
@@ -186,7 +189,7 @@ local function teleportWithRetries(list: { Player }, options: TeleportOptions): 
 			return false, MESSAGES.noPlayers
 		end
 		local ok, err = pcall(function()
-			return TeleportService:TeleportAsync(Places.GAME_PLACE_ID, current, options)
+			return TeleportService:TeleportAsync(matchPlaceId(), current, options)
 		end)
 		if ok then
 			return true, nil
@@ -206,7 +209,7 @@ local function teleportWithRetries(list: { Player }, options: TeleportOptions): 
 	return false, lastError
 end
 
--- Teleporta os jogadores juntos para um servidor reservado do place da partida.
+-- Teleporta os jogadores juntos para um servidor reservado deste place (que vira a partida).
 -- Cede (yield). Retorna (true) quando o pedido de teleporte foi aceito pelo Roblox, ou (false, motivo).
 function TeleportHandler.TeleportToGame(players: { Player }, data: TeleportData): (boolean, string?)
 	local list = validPlayers(players)
@@ -288,7 +291,7 @@ local function onTeleportInitFailed(
 
 	local retries = initRetries[player] or 0
 	local retryable = result == Enum.TeleportResult.Failure or result == Enum.TeleportResult.Flooded
-	if retryable and options and placeId == Places.GAME_PLACE_ID and retries < INIT_FAILED_RETRIES then
+	if retryable and options and placeId == matchPlaceId() and retries < INIT_FAILED_RETRIES then
 		initRetries[player] = retries + 1
 		pendingUntil[player] = os.clock() + PENDING_TIMEOUT
 		sendStatus(player, "teleporting", "O teleporte demorou. Tentando de novo…")

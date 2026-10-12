@@ -1,12 +1,14 @@
 --!nonstrict
--- IDs dos places do seu jogo no Roblox.
--- Os dois places precisam estar na MESMA experiência (universe):
---   1. Publique o lobby como place inicial (start place).
---   2. No Creator Hub / Asset Manager, adicione um segundo place para a partida.
---   3. Copie os IDs aqui e publique os dois de novo.
--- Enquanto os IDs forem 0, o teleporte mostra um aviso em vez de tentar teleportar.
+-- O jogo usa um ÚNICO place. O mesmo arquivo roda de dois jeitos:
+--   * servidor público  → LOBBY (menu, hub, configurações);
+--   * servidor reservado (criado pelo lobby com TeleportService:ReserveServer) → PARTIDA.
+-- Quem decide o modo de cada servidor é Shared/PlaceMode. O teleporte usa sempre game.PlaceId,
+-- então os IDs abaixo servem só de referência (e para o script de publicação).
 
 return {
-	LOBBY_PLACE_ID = 0,
-	GAME_PLACE_ID = 0,
+	UNIVERSE_ID = 2327303402,
+	PLACE_ID = 6305250851,
+
+	-- No Studio não existe servidor reservado. Troque para "game" para testar a partida direto no Play.
+	STUDIO_MODE = "lobby", -- "lobby" | "game"
 }

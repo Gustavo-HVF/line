@@ -18,6 +18,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+-- Place único: no lobby não há armas.
+if require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("PlaceMode")).Get() ~= "game" then
+	return
+end
+
 local Net = require(ReplicatedStorage.Shared.Net)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 local Tags = require(ReplicatedStorage.Shared.Tags)

@@ -3,10 +3,15 @@
 --   SoundUtil.EnsureGroups → iluminação → LobbyWorld.Build → DemoRoom.Build → SettingsStore.Init →
 --   PartyService.Init → TeleportHandler.Init
 -- Cada etapa roda protegida: um erro numa delas não impede as outras de iniciar.
+-- O place é único: este script só roda nos servidores públicos (ver Shared/PlaceMode).
 
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+
+if require(ReplicatedStorage.Shared.PlaceMode).Get() ~= "lobby" then
+	return -- servidor reservado: quem roda aqui é o GameMain
+end
 
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 

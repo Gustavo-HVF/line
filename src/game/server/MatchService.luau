@@ -14,7 +14,6 @@ local TeleportService = game:GetService("TeleportService")
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
-local Places = require(ReplicatedStorage.Shared.Config.Places)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local BoardService = require(script.Parent.BoardService)
@@ -392,9 +391,15 @@ end
 
 -- Fim da partida -------------------------------------------------------------------------
 
+-- O lobby é este mesmo place: um teleporte SEM servidor reservado leva para um servidor público,
+-- e servidor público sempre roda como lobby (ver Shared/PlaceMode).
+local function lobbyPlaceId(): number
+	return game.PlaceId
+end
+
 local function teleportPlayers(list: { Player }): (boolean, string?)
 	local ok, err = pcall(function()
-		return TeleportService:TeleportAsync(Places.LOBBY_PLACE_ID, list)
+		return TeleportService:TeleportAsync(lobbyPlaceId(), list)
 	end)
 	if ok then
 		return true, nil
@@ -410,12 +415,12 @@ local function returnToLobby()
 	end
 	state.countdown = nil
 
-	if Places.LOBBY_PLACE_ID == 0 or RunService:IsStudio() then
+	if lobbyPlaceId() <= 0 or RunService:IsStudio() then
 		state.message = "Fim da partida! (sem teleporte no Studio)"
 		broadcastState()
 		remotes.notify:FireAllClients(
-			"Fim da partida! No Studio (ou com LOBBY_PLACE_ID = 0 em Shared/Config/Places) não há teleporte "
-				.. "de volta ao lobby. Pare o teste para jogar de novo.",
+			"Fim da partida! No Studio (ou num place não publicado) não há teleporte de volta ao lobby. "
+				.. "Pare o teste para jogar de novo.",
 			"info"
 		)
 		return
@@ -704,9 +709,7 @@ function MatchService.Init(info)
 		task.spawn(onPlayerAdded, player)
 	end
 	Players.PlayerRemoving:Connect(onPlayerRemoving)
-	if Places.LOBBY_PLACE_ID ~= 0 then
-		TeleportService.TeleportInitFailed:Connect(onTeleportFailed)
-	end
+	TeleportService.TeleportInitFailed:Connect(onTeleportFailed)
 
 	setPhase("Loading", "Preparando a ilha…")
 	task.spawn(function()

@@ -1,13 +1,22 @@
 --!nonstrict
--- Ponto de entrada do servidor da PARTIDA (place do jogo).
--- Ordem: sons, iluminação, personagens manuais, configurações, remotes, mapa e serviços.
+-- Ponto de entrada do servidor da PARTIDA.
+-- Ordem: personagens manuais, sons, iluminação, configurações, remotes, mapa e serviços.
 -- Cada serviço inicia em pcall: um módulo quebrado não derruba os outros. Se o MapBuilder falhar,
 -- o erro aparece bem visível no Output e um mapa reserva simples é criado para o jogo continuar testável.
+-- O place é único: este script só roda no servidor reservado criado pelo lobby (ver Shared/PlaceMode).
 
 local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+
+if require(ReplicatedStorage.Shared.PlaceMode).Get() ~= "game" then
+	return -- servidor público: quem roda aqui é o LobbyMain
+end
+
+-- Personagens são criados pelo MatchService (sem respawn automático). Desligado antes de qualquer
+-- espera, para ninguém nascer sozinho enquanto o mapa é construído.
+Players.CharacterAutoLoads = false
 
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local Net = require(ReplicatedStorage.Shared.Net)
@@ -70,10 +79,7 @@ do
 	grade.Parent = Lighting
 end
 
--- 3. Personagens são criados pelo MatchService (sem respawn automático).
-Players.CharacterAutoLoads = false
-
--- 4. Configurações dos jogadores (Settings_Get / Settings_Save).
+-- 3. Configurações dos jogadores (Settings_Get / Settings_Save).
 do
 	local SettingsStore, err = tryRequire(ServerScriptService, "ServerShared", "SettingsStore")
 	if SettingsStore and type(SettingsStore.Init) == "function" then
@@ -86,7 +92,7 @@ do
 	end
 end
 
--- 5. Remotes usados pelo fluxo da partida (existem antes de qualquer cliente pedir).
+-- 4. Remotes usados pelo fluxo da partida (existem antes de qualquer cliente pedir).
 for _, name in
 	{
 		Net.Names.Game_ClientReady,
@@ -112,7 +118,7 @@ Net.event(Net.Names.Game_ClientReady).OnServerEvent:Connect(function(player)
 	end
 end)
 
--- 6. Mapa ---------------------------------------------------------------------------------
+-- 5. Mapa ----------------------------------------------------------------------------------
 
 -- Mapa reserva: plataforma, mesa com o tabuleiro e pontos de nascimento (só se o MapBuilder falhar).
 local function buildFallbackMap(reason: string)
@@ -287,7 +293,7 @@ if not workspace:GetAttribute("MapReady") then
 	workspace:SetAttribute("MapReady", true)
 end
 
--- 7. Serviços (cada um em pcall) ---------------------------------------------------------
+-- 6. Serviços (cada um em pcall) ----------------------------------------------------------
 
 local function initService(label: string, path: { string }, ...: any)
 	local module, err = tryRequire(GameFolder, table.unpack(path))
