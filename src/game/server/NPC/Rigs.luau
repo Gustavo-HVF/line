@@ -364,14 +364,8 @@ function builders.Hunter(name: string, base: CFrame)
 
 	local joints = {}
 	for index, side in { -1, 1 } do
-		local leg = partAt(
-			rig,
-			"Perna",
-			Vector3.new(0.9, 2, 0.9),
-			base * CFrame.new(side * 0.5, 1, 0),
-			c.pants,
-			M.Fabric
-		)
+		local leg =
+			partAt(rig, "Perna", Vector3.new(0.9, 2, 0.9), base * CFrame.new(side * 0.5, 1, 0), c.pants, M.Fabric)
 		local boot = partAt(
 			rig,
 			"Bota",
@@ -565,8 +559,10 @@ function builders.Plant(name: string, base: CFrame)
 	local lower = partAt(rig, "MandibulaDeBaixo", jawSize, lowerCFrame, c.head)
 	upper.Anchored = true
 	lower.Anchored = true
-	local upperExtras = { partAt(rig, "Boca", Vector3.new(1.9, 0.08, 1.9), upperCFrame * CFrame.new(0, -0.36, 0), c.inner) }
-	local lowerExtras = { partAt(rig, "Boca", Vector3.new(1.9, 0.08, 1.9), lowerCFrame * CFrame.new(0, 0.36, 0), c.inner) }
+	local upperExtras =
+		{ partAt(rig, "Boca", Vector3.new(1.9, 0.08, 1.9), upperCFrame * CFrame.new(0, -0.36, 0), c.inner) }
+	local lowerExtras =
+		{ partAt(rig, "Boca", Vector3.new(1.9, 0.08, 1.9), lowerCFrame * CFrame.new(0, 0.36, 0), c.inner) }
 	for _, x in { -0.6, 0, 0.6 } do
 		local toothSize = Vector3.new(0.25, 0.35, 0.25)
 		table.insert(upperExtras, partAt(rig, "Dente", toothSize, upperCFrame * CFrame.new(x, -0.5, -0.9), c.teeth))

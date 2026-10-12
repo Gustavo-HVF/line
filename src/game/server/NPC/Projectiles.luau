@@ -229,8 +229,7 @@ function Projectiles.Step(now: number)
 					end
 				end
 			elseif
-				now - entry.started > PROP_SETTLE_TIME
-				and part.AssemblyLinearVelocity.Magnitude < PROP_SETTLE_SPEED
+				now - entry.started > PROP_SETTLE_TIME and part.AssemblyLinearVelocity.Magnitude < PROP_SETTLE_SPEED
 			then
 				removeAt(index)
 			end

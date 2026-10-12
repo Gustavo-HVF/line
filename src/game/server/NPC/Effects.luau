@@ -258,8 +258,7 @@ function Effects.Burst(position: Vector3, color: Color3)
 	emitter.Texture = LEAF_TEXTURE
 	emitter.Color = ColorSequence.new(color)
 	emitter.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 1.2), NumberSequenceKeypoint.new(1, 2.6) })
-	emitter.Transparency =
-		NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 1) })
+	emitter.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 1) })
 	emitter.Lifetime = NumberRange.new(0.5, 0.9)
 	emitter.Speed = NumberRange.new(4, 9)
 	emitter.SpreadAngle = Vector2.new(180, 180)
@@ -485,8 +484,8 @@ function Effects.LaunchProp(part: BasePart, velocity: Vector3): BasePart?
 	local root: BasePart? = nil
 	if destruction and type(destruction.ReleaseProp) == "function" then
 		local ok, released = pcall(destruction.ReleaseProp, part, velocity)
-		if ok and typeof(released) == "Instance" then
-			root = released
+		if ok and typeof(released) == "Instance" and released:IsA("BasePart") then
+			root = released :: BasePart
 		end
 	end
 	if not root then

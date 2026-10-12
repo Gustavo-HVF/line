@@ -73,7 +73,15 @@ local function spec(
 	shape: Enum.PartType?,
 	wedge: boolean?
 ): PartSpec
-	return { name = name, size = size, cframe = cframe, color = color, material = material, shape = shape, wedge = wedge }
+	return {
+		name = name,
+		size = size,
+		cframe = cframe,
+		color = color,
+		material = material,
+		shape = shape,
+		wedge = wedge,
+	}
 end
 
 local BLUEPRINTS: { [string]: Blueprint } = {
@@ -101,7 +109,14 @@ local BLUEPRINTS: { [string]: Blueprint } = {
 		parts = {
 			spec("Corpo", Vector3.new(0.32, 0.4, 0.8), CFrame.new(0, 0.6, -0.2), METAL_DARK, M.Metal),
 			spec("Tambor", Vector3.new(0.5, 0.48, 0.48), CFrame.new(0, 0.6, -0.32) * ALONG_Z, METAL, M.Metal, CYLINDER),
-			spec("Cano", Vector3.new(1.15, 0.2, 0.2), CFrame.new(0, 0.7, -1.15) * ALONG_Z, METAL_DARK, M.Metal, CYLINDER),
+			spec(
+				"Cano",
+				Vector3.new(1.15, 0.2, 0.2),
+				CFrame.new(0, 0.7, -1.15) * ALONG_Z,
+				METAL_DARK,
+				M.Metal,
+				CYLINDER
+			),
 			spec("MiraFrontal", Vector3.new(0.05, 0.1, 0.08), CFrame.new(0, 0.84, -1.66), METAL, M.Metal),
 			spec("Cao", Vector3.new(0.08, 0.2, 0.14), CFrame.new(0, 0.86, 0.2), METAL, M.Metal),
 			spec("Guarda", Vector3.new(0.06, 0.06, 0.34), CFrame.new(0, 0.24, -0.2), BRASS, M.Metal),
@@ -159,9 +174,30 @@ local BLUEPRINTS: { [string]: Blueprint } = {
 	Dynamite = {
 		handle = spec("Handle", Vector3.new(0.7, 0.16, 0.64), CFrame.new(), TAPE, M.Fabric),
 		parts = {
-			spec("Banana1", Vector3.new(1.15, 0.3, 0.3), CFrame.new(-0.17, 0, 0.14) * ALONG_Y, DYNAMITE_RED, M.SmoothPlastic, CYLINDER),
-			spec("Banana2", Vector3.new(1.15, 0.3, 0.3), CFrame.new(0.17, 0, 0.14) * ALONG_Y, DYNAMITE_RED, M.SmoothPlastic, CYLINDER),
-			spec("Banana3", Vector3.new(1.15, 0.3, 0.3), CFrame.new(0, 0, -0.14) * ALONG_Y, DYNAMITE_RED, M.SmoothPlastic, CYLINDER),
+			spec(
+				"Banana1",
+				Vector3.new(1.15, 0.3, 0.3),
+				CFrame.new(-0.17, 0, 0.14) * ALONG_Y,
+				DYNAMITE_RED,
+				M.SmoothPlastic,
+				CYLINDER
+			),
+			spec(
+				"Banana2",
+				Vector3.new(1.15, 0.3, 0.3),
+				CFrame.new(0.17, 0, 0.14) * ALONG_Y,
+				DYNAMITE_RED,
+				M.SmoothPlastic,
+				CYLINDER
+			),
+			spec(
+				"Banana3",
+				Vector3.new(1.15, 0.3, 0.3),
+				CFrame.new(0, 0, -0.14) * ALONG_Y,
+				DYNAMITE_RED,
+				M.SmoothPlastic,
+				CYLINDER
+			),
 			spec("FitaDeCima", Vector3.new(0.7, 0.12, 0.64), CFrame.new(0, 0.38, 0), TAPE, M.Fabric),
 			spec("Pavio", Vector3.new(0.06, 0.42, 0.06), CFrame.new(0, 0.78, -0.14), FUSE, M.Fabric),
 		},
@@ -269,22 +305,35 @@ function ToolFactory.CreateTool(kind: string, owner: Player): Tool?
 		part.Parent = tool
 	end
 
-	-- Atributos lidos pelo cliente (UI, cadência e alcance da mira). Só o servidor os altera.
+	-- Atributos lidos pelo cliente (UI, cadência, alcance da mira e efeitos). Só o servidor os altera.
+	-- Os contadores *Seq sobem a cada uso aceito: os outros clientes reagem a eles (som, clarão, golpe).
 	tool:SetAttribute("WeaponKind", kind)
 	tool:SetAttribute("DisplayName", def.displayName)
 	tool:SetAttribute("Category", def.category)
 	tool:SetAttribute("Cooldown", def.cooldown)
 	tool:SetAttribute("Range", def.range)
+	if def.useSound then
+		tool:SetAttribute("UseSound", def.useSound)
+	end
 	if def.category == "gun" then
 		tool:SetAttribute("Ammo", def.maxAmmo)
 		tool:SetAttribute("MaxAmmo", def.maxAmmo)
 		tool:SetAttribute("ReloadTime", def.reloadTime)
 		tool:SetAttribute("Pellets", def.pellets or 1)
 		tool:SetAttribute("Spread", def.spread or 0)
+		tool:SetAttribute("Recoil", def.recoil or 10)
+		tool:SetAttribute("TracerColor", def.tracerColor or Color3.fromRGB(255, 226, 140))
+		tool:SetAttribute("TracerWidth", def.tracerWidth or 0.1)
 		tool:SetAttribute("Reloading", false)
+		tool:SetAttribute("FireSeq", 0)
 	elseif def.category == "throw" then
 		tool:SetAttribute("Charges", def.charges)
 		tool:SetAttribute("MaxCharges", def.maxCharges)
+		tool:SetAttribute("FuseTime", def.fuseTime)
+		tool:SetAttribute("BlastRadius", def.blastRadius)
+		tool:SetAttribute("ThrowSeq", 0)
+	else
+		tool:SetAttribute("SwingSeq", 0)
 	end
 	CollectionService:AddTag(tool, Tags.Weapon)
 
@@ -324,7 +373,9 @@ function ToolFactory.BuildDisplay(kind: string, target: CFrame): (Model?, BasePa
 		part.CFrame = partSpec.cframe
 		part.Parent = model
 	end
-	model.WorldPivot = CFrame.new(blueprint.displayCenter)
+	-- Com PrimaryPart, o pivô fica guardado como PivotOffset da raiz (replica junto com a part).
+	model.PrimaryPart = root
+	root.PivotOffset = CFrame.new(blueprint.displayCenter)
 	model:PivotTo(target * blueprint.displayTilt)
 	return model, root
 end

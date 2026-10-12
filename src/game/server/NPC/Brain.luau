@@ -101,7 +101,10 @@ function Brain.UpdateTarget(npc, now: number): (Player?, BasePart?, number)
 			local currentRoot = rootOf(current)
 			if current and currentRoot then
 				local currentDistance = (currentRoot.Position - position).Magnitude
-				if currentDistance <= def.leashRadius and not (nearest and nearestDistance < currentDistance - SWITCH_MARGIN) then
+				if
+					currentDistance <= def.leashRadius
+					and not (nearest and nearestDistance < currentDistance - SWITCH_MARGIN)
+				then
 					chosen = current
 				else
 					chosen = nearest
